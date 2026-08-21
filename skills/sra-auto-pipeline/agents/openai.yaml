@@ -1,0 +1,8 @@
+interface:
+  display_name: "SRA Auto Pipeline"
+  short_description: "Run resumable SRA single-cell pipelines"
+  default_prompt: "Use $sra-auto-pipeline to process SRA or FASTQ runs into validated Cell Ranger matrices and loom outputs."
+
+policy:
+  allow_implicit_invocation: true
+
