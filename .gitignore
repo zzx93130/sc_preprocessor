@@ -1,0 +1,34 @@
+# Local machine configuration, credentials and environment
+config.yaml
+.env
+.env.*
+!.env.example
+.aws/
+*.pem
+*.key
+.venv/
+pipeline/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Never commit inputs, outputs, Docker disks or downloaded tool bundles
+runs/
+work/
+archive/
+to_process/
+tools/
+docker-storage/
+reports/
+deployment-bundle/
+*.sra
+*.part
+*.fastq*
+*.bam
+*.bai
+*.loom
+*.vhdx
+*.zip
+*.tar.gz
+*.corrupt-crosslink.bin
+.DS_Store
+._*

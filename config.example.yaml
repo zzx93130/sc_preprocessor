@@ -1,0 +1,60 @@
+# LEGACY native macOS example, not the Windows deployment template.
+# Windows: use install-windows.ps1 / docs/WINDOWS-DEPLOYMENT.md instead.
+# scpre configuration — copy is created as config.yaml by `./scpre init`.
+# All paths are machine-specific; nothing is hard-coded in the pipeline.
+project: default
+paths:
+  cellranger_dir: /Volumes/YOUR_SSD/sc_preprocessor/tools/cellranger-10.1.0
+  reference_dir: /Volumes/YOUR_SSD/sc_preprocessor/tools/refdata-gex-GRCh38-2024-A
+  # Must be APFS/ext4 (not exFAT): Cell Ranger/Martian requires Unix inodes.
+  work_root: /Users/YOU/sc_preprocessor_work         # intermediates + temp
+  archive_root: "/Volumes/Seagate Basic/sc_archive"  # durable archive
+  inbox_dir: /Volumes/YOUR_SSD/sc_preprocessor/to_process
+concurrency:
+  max_active_samples: 2      # samples in flight (stages of different samples overlap)
+  separate_downloads: false # true: use the two independent limits below instead
+  max_download_jobs: 1
+  max_preprocessing_samples: 1 # conversion through verified archive/cleanup
+  download_ahead: 1         # bound downloaded samples awaiting preprocessing
+  max_cellranger_jobs: 1     # keep 1: never oversubscribe memory
+  cellranger_cores: 18
+  cellranger_mem_gb: 96
+  convert_threads: 6
+docker:
+  enabled: true
+  cellranger_image: scpre-crbase:latest
+  # Windows: set these to keep Martian's symlink-heavy pipestance on Docker
+  # ext4. Leave the prefix empty on a native APFS/ext4 work_root.
+  cellranger_volume: ""             # optional volume containing Cell Ranger
+  cellranger_work_volume_prefix: "" # e.g. scpre-pipestance on Windows
+  cellranger_volume_min_free_gb: 100
+  sratools_image: scpre-sratools:latest
+  velocyto_image: scpre-velocyto:latest
+  cellranger_platform: linux/amd64
+  sratools_platform: linux/amd64
+  velocyto_platform: linux/amd64
+space:
+  fastq_multiplier: 2.2      # fastq.gz footprint vs .sra size
+  conversion_multiplier: 10.0 # fasterq raw output + merge temp vs .sra
+  cellranger_multiplier: 2.5 # cellranger workdir vs fastq.gz
+  min_free_work_gb: 100
+  min_free_archive_gb: 50
+dashboard:
+  host: 127.0.0.1
+  port: 9123
+cleanup:
+  remove_inbox: false        # keep original .sra in the inbox after archival
+  # On macOS, wait for all containers, restart Docker Desktop once, then delete
+  # bind-mounted work trees so virtiofs cannot retain invisible disk blocks.
+  restart_docker_desktop_at_idle: true
+  docker_desktop_restart_timeout_s: 180
+pipeline:
+  create_bam: true           # required for velocyto
+  make_loom: true
+  chemistry: auto
+metadata:
+  sra_run_table: ""          # explicit path; default: auto-discover
+  process_all: false         # only queue samples whose .sra files are present
+  read_maps: {}              # e.g. {"SRR123": "1=I1,2=R1,3=R2"}
+tools:
+  mode: docker               # docker | mock

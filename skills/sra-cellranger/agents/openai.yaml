@@ -1,0 +1,4 @@
+interface:
+  display_name: "SRA Cell Ranger"
+  short_description: "Download SRA FASTQs and run Cell Ranger"
+  default_prompt: "Use $sra-cellranger to download single-cell SRA FASTQs, run Cell Ranger, archive raw reads, clean caches, and write a summary report."

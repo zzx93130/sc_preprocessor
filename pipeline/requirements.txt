@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn>=0.29
+PyYAML>=6.0
+psutil>=5.9
+zstandard>=0.23

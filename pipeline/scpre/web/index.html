@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>scpre — single-cell preprocessing</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --bg:#101418; --panel:#1a2027; --panel2:#212a33; --text:#e6edf3;
+  --dim:#8b98a5; --line:#2d3742; --ok:#3fb950; --warn:#d29922;
+  --err:#f85149; --run:#58a6ff; --accent:#79c0ff;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;
+  border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+h1{font-size:17px;margin:0;font-weight:600}
+h1 small{color:var(--dim);font-weight:400;margin-left:8px}
+.spacer{flex:1}
+button{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;padding:5px 12px;cursor:pointer;font-size:13px}
+button:hover{border-color:var(--accent)}
+button.retry{border-color:var(--warn);color:var(--warn)}
+.banner{padding:10px 20px;font-weight:600}
+.banner.error{background:#3d1418;color:#ffb3ad;border-bottom:1px solid #67060c}
+.banner.warn{background:#3a2d12;color:#f0d489;border-bottom:1px solid #6b5618}
+main{padding:18px 20px;max-width:1400px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;
+  letter-spacing:.06em;color:var(--dim);font-weight:600}
+.bar{height:8px;background:var(--panel2);border-radius:4px;overflow:hidden;margin:6px 0 4px}
+.bar i{display:block;height:100%;background:var(--run);border-radius:4px;transition:width .5s}
+.bar i.hot{background:var(--err)} .bar i.warm{background:var(--warn)}
+.kv{color:var(--dim);font-size:12.5px}
+.kv b{color:var(--text);font-weight:600}
+table{width:100%;border-collapse:collapse;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);
+  vertical-align:top;font-size:13px}
+th{background:var(--panel2);color:var(--dim);font-size:11.5px;
+  text-transform:uppercase;letter-spacing:.05em}
+tr:last-child td{border-bottom:0}
+.chip{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;
+  border:1px solid var(--line);margin:1px 2px 1px 0;color:var(--dim)}
+.chip.completed{color:var(--ok);border-color:var(--ok)}
+.chip.started{color:var(--run);border-color:var(--run);animation:pulse 1.6s infinite}
+.chip.failed{color:var(--err);border-color:var(--err)}
+.chip.interrupted{color:var(--warn);border-color:var(--warn)}
+@keyframes pulse{50%{opacity:.45}}
+.status{font-weight:600}
+.status.done{color:var(--ok)} .status.failed{color:var(--err)}
+.status.active{color:var(--run)} .status.queued{color:var(--dim)}
+.status.waiting{color:var(--warn)}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+.links a{margin-right:10px;font-size:12.5px}
+.err{color:var(--err);font-size:12.5px;max-width:340px;word-break:break-word}
+.meta{color:var(--dim);font-size:12px}
+#logbox{position:fixed;inset:6% 8%;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;display:none;flex-direction:column;z-index:20;box-shadow:0 12px 40px #000a}
+#logbox header{border-radius:10px 10px 0 0}
+#logtext{flex:1;overflow:auto;margin:0;padding:14px;font:12px/1.5 ui-monospace,Menlo,monospace;
+  white-space:pre-wrap;color:#c9d1d9}
+#overlay{position:fixed;inset:0;background:#0009;display:none;z-index:15}
+footer{color:var(--dim);font-size:12px;padding:14px 20px;text-align:center}
+.jobs{font-size:12px;color:var(--dim)}
+.jobs b{color:var(--text)}
+</style>
+</head>
+<body>
+<header>
+  <h1>scpre <small id="project"></small></h1>
+  <span class="kv" id="uptime"></span>
+  <div class="spacer"></div>
+  <button id="pauseBtn" onclick="togglePause()">Pause queue</button>
+  <button onclick="post('/api/scan')">Rescan inbox</button>
+</header>
+<div id="banners"></div>
+<main>
+  <div class="grid" id="cards"></div>
+  <table>
+    <thead><tr>
+      <th>Sample</th><th>Runs / input</th><th>Stages</th><th>Status</th>
+      <th>Metadata</th><th>Results</th><th></th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="7" class="meta">loading…</td></tr></tbody>
+  </table>
+</main>
+<div id="overlay" onclick="hideLog()"></div>
+<div id="logbox">
+  <header><h1 id="logtitle">log</h1><div class="spacer"></div>
+    <button onclick="hideLog()">Close</button></header>
+  <pre id="logtext"></pre>
+</div>
+<footer>scpre pipeline dashboard — auto-refreshes every 4 s</footer>
+<script>
+let paused=false, logSample=null, actionError='';
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const gb=n=>(n/1e9).toFixed(1)+' GB';
+const pct=(u,t)=>t?Math.round(100*u/t):0;
+const fmtT=ts=>ts?new Date(ts*1000).toLocaleString():'—';
+const fmtD=s=>{if(s==null)return'';if(s<90)return s.toFixed(0)+'s';
+  if(s<5400)return(s/60).toFixed(1)+'m';return(s/3600).toFixed(1)+'h';};
+
+function barCls(p){return p>90?'hot':p>75?'warm':''}
+function bar(p){return `<div class="bar"><i class="${barCls(p)}" style="width:${p}%"></i></div>`}
+
+function diskCard(name,d){
+  if(!d.ok)return `<div class="card"><h3>${name} disk</h3>
+    <span class="err">UNAVAILABLE — ${esc(d.error||'not mounted')}</span></div>`;
+  const p=pct(d.used,d.total);
+  return `<div class="card"><h3>${name} disk</h3>${bar(p)}
+    <span class="kv"><b>${gb(d.free)}</b> free of ${gb(d.total)} (${p}% used)</span>
+    <div class="meta">${esc(d.path)}</div></div>`;
+}
+
+function jobsHtml(jobs,health){
+  const keys=Object.keys(jobs||{});
+  const stale=health&&health.stale?'<div class="meta">last known scheduler values</div>':'';
+  if(!keys.length)return '<div class="jobs">no jobs running</div>'+stale;
+  return '<div class="jobs">'+keys.map(k=>
+    `<div><b>${esc(k)}</b> — ${jobs[k].sample?esc(jobs[k].sample)+' · ':''}`+
+    `${jobs[k].node?esc(jobs[k].node)+' · ':''}${esc(jobs[k].stage||jobs[k].state||'running')}`+
+    `${jobs[k].cpu?' · CPU '+esc(jobs[k].cpu):''}${jobs[k].mem?' · mem '+esc(jobs[k].mem):''}</div>`
+  ).join('')+stale+'</div>';
+}
+
+async function refresh(){
+  let st;
+  try{st=await(await fetch('/api/state')).json();}
+  catch(e){$('banners').innerHTML='<div class="banner error">Dashboard cannot reach the pipeline service.</div>';return;}
+  paused=st.paused;
+  $('project').textContent=st.project||'';
+  $('pauseBtn').textContent=paused?'Resume queue':'Pause queue';
+  $('uptime').textContent='service up since '+fmtT(st.server_started_at);
+  const notices=(st.warnings||[]).slice();
+  if(actionError)notices.unshift({level:'error',message:actionError});
+  $('banners').innerHTML=notices.map(w=>
+    `<div class="banner ${w.level==='error'?'error':'warn'}">${esc(w.message)}</div>`).join('');
+
+  let m=null;
+  try{const ms=await(await fetch('/api/metrics?minutes=2')).json();m=ms[ms.length-1];}catch(e){}
+  const cards=[];
+  const d=st.disks||{};
+  Object.keys(d).forEach(k=>cards.push(diskCard(k,d[k]||{})));
+  if(m){
+    cards.push(`<div class="card"><h3>CPU</h3>${bar(m.cpu_pct)}
+      <span class="kv"><b>${m.cpu_pct.toFixed(0)}%</b> machine load</span></div>`);
+    cards.push(`<div class="card"><h3>Memory</h3>${bar(pct(m.mem_used,m.mem_total))}
+      <span class="kv"><b>${gb(m.mem_used)}</b> of ${gb(m.mem_total)}</span></div>`);
+    cards.push(`<div class="card"><h3>Running jobs</h3>${jobsHtml(m.jobs,st.docker_stats)}</div>`);
+  }
+  const workers=st.active_workers||[];
+  cards.push(`<div class="card"><h3>Scheduler workers</h3><div class="jobs">${
+    workers.length?workers.map(x=>`<div><b>${esc(x)}</b></div>`).join(''):'none active'
+  }</div></div>`);
+  $('cards').innerHTML=cards.join('');
+
+  const rows=(st.samples||[]).map(s=>{
+    const chips=(s.stage_events||[]).filter(e=>e.status!=='skipped').map(e=>
+      `<span class="chip ${e.status}" title="${esc(e.detail)} ${fmtT(e.started_at)}">`+
+      `${e.stage}${e.duration_s!=null?' '+fmtD(e.duration_s):''}</span>`).join('');
+    const md=s.meta||{};
+    const links=[`<a href="#" onclick="showLog('${s.id}');return false">log</a>`];
+    if(s.links.web_summary)links.push(`<a href="${s.links.web_summary}" target="_blank">web_summary</a>`);
+    if(s.links.loom)links.push(`<a href="${s.links.loom}">loom</a>`);
+    links.push(`<a href="${s.links.outs}" target="_blank">outs</a>`);
+    const retry=s.status==='failed'
+      ?`<button class="retry" onclick="retry('${s.id}')">Retry</button>`:'';
+    return `<tr>
+      <td><b>${esc(s.id)}</b><div class="meta">${esc(md.gsm&&md.gsm!==s.id?md.gsm:'')}</div></td>
+      <td class="meta">${esc(s.mode)} · ${(s.srrs||[]).length?esc(s.srrs.join(', ')):'fastq input'}
+        ${md.read_counts?`<div>${Number(md.read_counts).toLocaleString()} spots</div>`:''}</td>
+      <td>${chips||'<span class="meta">queued</span>'}</td>
+      <td><span class="status ${s.status}">${s.status}</span>
+        ${s.error?`<div class="err">${esc(s.error)}</div>`:''}
+        ${md.cleanup_pending?'<div class="meta">verified; temporary cleanup pending</div>':''}
+        ${md.archive_pending?'<div class="meta">archive pending; worker result retained</div>':''}
+        ${md.pbs_job_id?`<div class="meta">PBS ${esc(md.pbs_job_id)} · ${esc(md.pbs_state||'')}<br>${esc(md.compute_node||'unassigned')}</div>`:''}
+        <div class="meta">start ${fmtT(s.created_at)}<br>update ${fmtT(s.updated_at)}</div></td>
+      <td class="meta">${md.organism?esc(md.organism)+'<br>':''}
+        ${md.cellranger_version?'CR '+esc(md.cellranger_version)+'<br>':''}
+        ${md.reference?esc(String(md.reference).split('/').pop()):''}</td>
+      <td class="links">${links.join('')}</td>
+      <td>${retry}</td></tr>`;
+  });
+  $('rows').innerHTML=rows.join('')||'<tr><td colspan="7" class="meta">No samples yet — drop .sra files + SraRunTable.csv in the inbox, then Rescan.</td></tr>';
+  if(logSample)loadLog();
+}
+
+async function post(u){
+  try{
+    const r=await fetch(u,{method:'POST'});
+    const body=await r.json().catch(()=>({}));
+    actionError=r.ok?'':(body.detail||body.error||`Request failed (${r.status})`);
+  }catch(e){actionError='Dashboard request failed: '+e;}
+  refresh();
+}
+async function togglePause(){await post(paused?'/api/resume':'/api/pause');}
+async function retry(id){await post('/api/retry/'+id);}
+function showLog(id){logSample=id;$('overlay').style.display='block';
+  $('logbox').style.display='flex';$('logtitle').textContent=id+' — log';loadLog();}
+function hideLog(){logSample=null;$('overlay').style.display='none';$('logbox').style.display='none';}
+async function loadLog(){if(!logSample)return;
+  try{const r=await(await fetch('/api/logs/'+logSample+'?tail=400')).json();
+    const el=$('logtext');const atEnd=el.scrollTop+el.clientHeight>=el.scrollHeight-40;
+    el.textContent=(r.lines||[]).join('\n');if(atEnd)el.scrollTop=el.scrollHeight;}
+  catch(e){$('logtext').textContent='(no log yet)';}}
+refresh();setInterval(refresh,4000);
+</script>
+</body>
+</html>
