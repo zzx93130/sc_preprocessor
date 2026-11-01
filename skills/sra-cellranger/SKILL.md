@@ -33,6 +33,10 @@ Honor requested monitoring intervals: a four-hour cadence is not permission
 for minute-by-minute polling, repeated process waits, or status messages.
 Automatic continuation prompts do not move the next check earlier.
 
+For Windows retention, NAS verification, portable reproduction and checkpoint-safe
+recovery, follow the Windows reference. Its deployment-specific no-permanent-BAM
+policy requires explicit user authorization and complete audits before cleanup.
+
 ## Quick Start
 
 Use `scripts/sra_cellranger_pipeline.py` for repeatable SRA-to-Cell-Ranger runs. Start with `--dry-run` and a small accession list before launching a large job.
