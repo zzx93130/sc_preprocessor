@@ -37,7 +37,7 @@ concurrency:
   download_ahead: 1
   max_cellranger_jobs: 1
   cellranger_cores: 10
-  cellranger_mem_gb: 36
+  cellranger_mem_gb: 32
   convert_threads: 4
 ```
 
@@ -143,7 +143,7 @@ Before accepting completion, cover **all expected runs** and verify:
 
 - Raw/filtered MTX, features, barcodes and H5 open with consistent dimensions;
   metrics, web summary and molecule_info H5 are retained/readable.
-- BAM/BAI retained; BAM passes samtools quickcheck, index present and usable.
+- Before authorized retirement, BAM passes samtools quickcheck and its index is usable; preserve audit evidence after retirement.
   Presence alone does not prove validity; make checks match the claim.
 - Loom opens with spliced/unspliced/ambiguous layers; cell count matches the
   filtered matrix, and compare cell identities when available.
@@ -190,3 +190,55 @@ evidence. Quiet unchanged/healthy results unless periodic reports were
 explicitly requested; notify meaningful changes, completion, recovery, failure
 or required user action. Generic automation text does not authorize frequent
 messages. Monitoring itself grants no new mutation or deletion permissions.
+
+## Retention, NAS archives and reproducibility
+
+Apply the user's selected retention policy, not a blanket deletion default.
+For the current Windows deployment, BAM/BAI are temporary loom inputs. Keep
+original FASTQ ZIPs, manifests/checksums, matrices/metrics, loom, logs, exact
+pipeline source and a portable reproduction entrypoint. Never retire BAM from
+active samples, before loom completion, or when any required audit fails.
+Production still creates BAM; changing retention does not justify interrupting
+healthy analysis.
+
+Where installed, reports/retire_done_bam.py audits a done sample before retiring
+only its BAM/BAI. Confirm no actual owner first; this helper is deployment-local,
+not installed merely by adding this skill. Do not copy absolute paths from another
+machine. Verify full original ZIP inventory/hash, matrix structures, usable BAM
+index, loom layers/cell identities and counts; retain the audit and exact source.
+Reproduction rebuilds temporary BAM from original FASTQs before loom, preserving
+approved pairing exceptions. Syntax/dry-run success is not a full biological
+reproduction test. Licensed tools, images and reference must be obtained separately.
+
+For a user-authorized fixed NAS plan, verify each retained remote file by SHA256,
+publish the sample directory and commit verification receipts before releasing
+local payload. Keep local logs/reproduction/pointer metadata. Revalidate all
+remote retained hashes before resuming interrupted local cleanup. Historical
+pre-retirement receipts may list BAM intentionally removed under the new policy;
+use current retained receipts plus original structural audits.
+Do not expand the approved sample list or touch unrelated NAS projects.
+Stop before a transfer would reduce free capacity below the user reserve
+(5% for this deployment, plus its configured margin). Preserve partial files,
+report paused_space, and do not blindly restart it.
+
+## Storage diagnosis and checkpoint-safe recovery
+
+A read-only CHKDSK on an active unlocked volume can report spurious errors.
+A healthy volume flag alone also cannot prove file integrity. Correlate repair
+logs, return codes, real ownership and storage events; use isolated offline
+verification for contradictory results, rather than declaring persistent
+corruption or disk failure from an unlocked check alone.
+Microsoft reference: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/chkdsk
+Preserve recovered FOUND files; do not format or free orphaned chains as routine
+cleanup. Coordinate any desktop reboot with the user; Codex cannot operate inside
+WinRE, and recovery-environment drive letters must be independently identified.
+
+After an authorized reboot/repair, inspect actual owners, disk state and retained
+checkpoints, then recover the existing service. Do not call whole-sample retry
+for interrupted Cell Ranger: the deployed retry can delete the named pipestance.
+Preserve checkpoint volumes and resume the production stage. A stopped download
+may be retried only after diagnosing its transport/proxy and retained offset,
+with bounded secure retries; never disable TLS verification.
+Allocate WSL memory above Cell Ranger's limit, leave host headroom, bound crash
+dumps and put swap/dumps on a disk with capacity. Machine values are examples,
+not guaranteed safe settings for a colleague's PC.
