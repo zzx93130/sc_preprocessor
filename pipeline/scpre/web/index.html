@@ -57,6 +57,8 @@ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
 .links a{margin-right:10px;font-size:12.5px}
 .err{color:var(--err);font-size:12.5px;max-width:340px;word-break:break-word}
 .meta{color:var(--dim);font-size:12px}
+.tech{font-size:11px;font-weight:600;padding:1px 6px;border-radius:8px;border:1px solid var(--dim);color:var(--dim);vertical-align:middle}
+.tech-atac,.tech-multiome,.tech-snrna{border-color:var(--run);color:var(--run)}
 #logbox{position:fixed;inset:6% 8%;background:var(--panel);border:1px solid var(--line);
   border-radius:10px;display:none;flex-direction:column;z-index:20;box-shadow:0 12px 40px #000a}
 #logbox header{border-radius:10px 10px 0 0}
@@ -170,8 +172,9 @@ async function refresh(){
     const retry=s.status==='failed'
       ?`<button class="retry" onclick="retry('${s.id}')">Retry</button>`:'';
     return `<tr>
-      <td><b>${esc(s.id)}</b><div class="meta">${esc(md.gsm&&md.gsm!==s.id?md.gsm:'')}</div></td>
-      <td class="meta">${esc(s.mode)} · ${(s.srrs||[]).length?esc(s.srrs.join(', ')):'fastq input'}
+      <td><b>${esc(s.id)}</b> <span class="tech tech-${esc(md.tech||'rna')}" title="technology label">${esc(md.tech||'rna')}</span>
+        <div class="meta">${esc(md.gsm&&md.gsm!==s.id?md.gsm:'')}${md.multiome_members?esc(md.multiome_members.join(' + ')):''}</div></td>
+      <td class="meta">${esc(s.mode)} · ${(s.srrs||[]).length?esc(s.srrs.map(r=>md.library_types&&md.library_types[r]?r+' ('+md.library_types[r]+')':r).join(', ')):'fastq input'}
         ${md.read_counts?`<div>${Number(md.read_counts).toLocaleString()} spots</div>`:''}</td>
       <td>${chips||'<span class="meta">queued</span>'}</td>
       <td><span class="status ${s.status}">${s.status}</span>

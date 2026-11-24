@@ -6,6 +6,10 @@ project: default
 paths:
   cellranger_dir: /Volumes/YOUR_SSD/sc_preprocessor/tools/cellranger-10.1.0
   reference_dir: /Volumes/YOUR_SSD/sc_preprocessor/tools/refdata-gex-GRCh38-2024-A
+  # Only needed for samples labelled atac / multiome (leave empty otherwise).
+  cellranger_atac_dir: ""    # e.g. .../tools/cellranger-atac-2.2.0
+  cellranger_arc_dir: ""     # e.g. .../tools/cellranger-arc-2.2.0
+  atac_reference_dir: ""     # e.g. .../tools/refdata-cellranger-arc-GRCh38-2020-A-2.0.0
   # Must be APFS/ext4 (not exFAT): Cell Ranger/Martian requires Unix inodes.
   work_root: /Users/YOU/sc_preprocessor_work         # intermediates + temp
   archive_root: "/Volumes/Seagate Basic/sc_archive"  # durable archive
@@ -52,9 +56,20 @@ pipeline:
   create_bam: true           # required for velocyto
   make_loom: true
   chemistry: auto
+  default_tech: rna          # label for samples without one: rna | snrna | atac | multiome
+  multiome_create_bam: false # cellranger-arc --create-bam
+  arc_legacy_no_bam: false   # true only for Cell Ranger ARC 2.0 (--no-bam)
+  archive_atac_bam: false    # cellranger-atac always writes a BAM; archive it?
 metadata:
   sra_run_table: ""          # explicit path; default: auto-discover
   process_all: false         # only queue samples whose .sra files are present
-  read_maps: {}              # e.g. {"SRR123": "1=I1,2=R1,3=R2"}
+  read_maps: {}              # e.g. {"SRR123": "1=I1,2=R1,3=R2"}; ATAC: "1=R1,2=R2,3=R3"
+  # Technology label per sample id or run. A `tech` column in SraRunTable.csv
+  # works too; ATAC is also recognised from "Assay Type" = ATAC-seq.
+  tech: {}                   # e.g. {"GSM123": "atac", "GSM124": "snrna"}
+  # Multiome whose ATAC and GEX libraries are separate GSMs: one new sample id
+  # per pair (or a shared `multiome_sample` column in SraRunTable.csv).
+  multiome_pairs: {}         # e.g. {"donor1": ["GSM200", "GSM201"]}
+  library_types: {}          # e.g. {"SRR999": "atac"} to override a multiome run
 tools:
   mode: docker               # docker | mock

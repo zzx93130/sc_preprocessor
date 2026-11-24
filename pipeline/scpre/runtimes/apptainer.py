@@ -122,7 +122,7 @@ class ApptainerRunner:
 
     def cellranger_count(self, sample: str, fastq_dir: Path, run_dir: Path,
                          ref_dir: Path, cores: int, mem_gb: int,
-                         create_bam: bool, logger):
+                         create_bam: bool, logger, extra_args=()):
         run_dir.mkdir(parents=True, exist_ok=True)
         temporary = run_dir / "tmp"
         temporary.mkdir(exist_ok=True)
@@ -135,13 +135,21 @@ class ApptainerRunner:
              "--fastqs=/fastq", f"--sample={sample}", "--transcriptome=/ref",
              f"--localcores={cores}", f"--localmem={mem_gb}",
              f"--create-bam={'true' if create_bam else 'false'}",
-             "--disable-ui"],
+             *extra_args, "--disable-ui"],
             logger, workdir="/work", env={"TMPDIR": "/work/tmp"},
         )
         outs = run_dir / sample / "outs"
         if not outs.is_dir():
             raise ToolError(f"Cell Ranger outputs are missing: {outs}")
         return outs
+
+    def cellranger_atac_count(self, *_args, **_kwargs):
+        raise ToolError(
+            "tech atac is not supported in cluster mode; use the local Docker queue")
+
+    def cellranger_arc_count(self, *_args, **_kwargs):
+        raise ToolError(
+            "tech multiome is not supported in cluster mode; use the local Docker queue")
 
     def velocyto(self, sample: str, outs_dir: Path, gtf_path: Path,
                  loom_dir: Path, threads: int, logger):

@@ -13,6 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from . import repro
+from . import tech as techmod
 from .docker_run import ToolError
 from .sra_table import parse_read_map
 from .util import gzip_ok, path_available, rm_rf, sha256_file
@@ -75,6 +76,10 @@ class StageContext:
     @property
     def archive(self) -> Path:
         return self.cfg.archive_sample_dir(self.sid)
+
+    @property
+    def tech(self) -> str:
+        return techmod.sample_tech(self.sample)
 
     # -- sentinels --------------------------------------------------------
     def sentinel(self, stage: str) -> Path:
@@ -277,12 +282,15 @@ def stage_converting(ctx: StageContext):
         outputs = _stage_fastq_ingest(ctx)
     else:
         outputs = _stage_sra_convert(ctx)
-    # validate
-    r1 = [p for p in outputs if "_R1_" in Path(p).name]
-    r2 = [p for p in outputs if "_R2_" in Path(p).name]
-    if not r1 or not r2:
-        raise ToolError(
-            f"converting produced no R1/R2 pair for {ctx.sid}: {outputs}")
+    # validate: every library of this tech has all of its read roles
+    names = [Path(p).name for p in outputs]
+    for lib, prefix in techmod.sample_prefixes(ctx.sample).items():
+        have = {n.split("_")[-2] for n in names if n.startswith(f"{prefix}_S1_")}
+        missing = sorted(techmod.required_roles(lib) - have)
+        if missing:
+            raise ToolError(
+                f"converting produced no {'/'.join(missing)} for the {lib} "
+                f"library of {ctx.sid} (tech {ctx.tech}): {names}")
     for p in outputs:
         if not gzip_ok(Path(p)):
             raise ToolError(f"gzip validation failed for {p}")
@@ -297,7 +305,13 @@ def _stage_sra_convert(ctx: StageContext):
     sra_paths = ctx.sample["meta"].get("sra_paths", {})
     for lane, srr in enumerate(ctx.sample["srrs"], start=1):
         lane_tag = f"L{lane:03d}"
-        lane_prefix = f"{ctx.sid}_S1_{lane_tag}_"
+        try:
+            lib = techmod.library_type(ctx.sample, srr)
+        except ValueError as e:
+            raise ToolError(str(e)) from None
+        needed = techmod.required_roles(lib)
+        fq_prefix = techmod.fastq_prefix(ctx.sid, ctx.tech, lib)
+        lane_prefix = f"{fq_prefix}_S1_{lane_tag}_"
         expected = sorted(
             ctx.fastq_dir.glob(f"{lane_prefix}*_001.fastq.gz")
         )
@@ -317,7 +331,7 @@ def _stage_sra_convert(ctx: StageContext):
         roles_present = staged_roles | {
             p.name.split("_")[-2] for p in valid_gz
         }
-        if {"R1", "R2"} <= roles_present:
+        if needed <= roles_present:
             if staged:
                 ctx.log.info(
                     "lane %s (%s) has completed uncompressed reads; "
@@ -335,7 +349,7 @@ def _stage_sra_convert(ctx: StageContext):
             outputs += [str(p) for p in sorted(valid_gz)]
             rm_rf(ctx.work / "raw_fastq" / srr)
             continue
-        for p in ctx.fastq_dir.glob(f"{ctx.sid}_S1_{lane_tag}_*"):
+        for p in ctx.fastq_dir.glob(f"{lane_prefix}*"):
             rm_rf(p)  # clean partial lane
         sra = Path(sra_paths.get(srr) or resolve_sra_inputs(ctx.cfg, srr)
                    or (ctx.sra_dir / f"{srr}.sra"))
@@ -367,6 +381,14 @@ def _stage_sra_convert(ctx: StageContext):
                 roles[p] = role_map.get(idx, "SKIP")
             ctx.log.info("read roles from metadata.read_maps: %s",
                          {p.name: r for p, r in roles.items()})
+        elif lib == techmod.ATAC_LIB:
+            lengths = {p: _read_stats(p)["median_len"] for p in produced}
+            ctx.log.info("ATAC read lengths: %s",
+                         {p.name: n for p, n in lengths.items()})
+            try:
+                roles = techmod.assign_atac_roles(lengths)
+            except ValueError as e:
+                raise ToolError(str(e)) from None
         else:
             decision = {}
             whitelist = (ctx.cfg.path("cellranger_dir") / "lib/python/cellranger/barcodes/737K-august-2016.txt")
@@ -384,6 +406,11 @@ def _stage_sra_convert(ctx: StageContext):
         if len(assigned) != len(set(assigned)):
             raise ToolError(f"role assignment collision for {srr}: "
                             f"{ {p.name: r for p, r in roles.items()} }")
+        if not needed <= set(assigned):
+            raise ToolError(
+                f"{srr} ({lib} library) needs roles {sorted(needed)} but got "
+                f"{ {p.name: r for p, r in roles.items()} }; fix "
+                "metadata.read_maps or the tech label for this sample")
         renamed = []
         for p in produced:
             role = roles.get(p)
@@ -391,7 +418,7 @@ def _stage_sra_convert(ctx: StageContext):
                 ctx.log.info("skipping %s (role SKIP)", p.name)
                 p.unlink()
                 continue
-            dest = ctx.fastq_dir / f"{ctx.sid}_S1_{lane_tag}_{role}_001.fastq"
+            dest = ctx.fastq_dir / f"{lane_prefix}{role}_001.fastq"
             ctx.log.info("%s -> %s", p.name, dest.name)
             shutil.move(str(p), str(dest))
             renamed.append(dest)
@@ -453,16 +480,23 @@ def _stage_fastq_ingest(ctx: StageContext):
     inputs = [Path(p) for p in ctx.sample["meta"].get("input_paths", [])]
     if not inputs:
         raise ToolError(f"fastq mode but no input_paths for {ctx.sid}")
+    if ctx.tech == techmod.MULTIOME:
+        raise ToolError("multiome samples are not supported in FASTQ mode")
+    atac = ctx.tech == techmod.ATAC
     outputs = []
     lanes = {}
     for p in sorted(inputs):
         name = p.name
         role = None
-        for r in ("R1", "R2", "I1", "I2"):
+        for r in ("R1", "R2", "R3", "I1", "I2"):
             if f"_{r}_" in name or name.endswith(f"_{r}.fastq.gz") \
                     or f"_{r}." in name:
                 role = r
                 break
+        if role is None and atac:
+            raise ToolError(
+                f"ATAC FASTQ {name} must carry its role in the file name "
+                "(_R1_, _R2_ = barcode, _R3_, _I1_)")
         if role is None:
             role = _detect_role_gz(p)
         import re
@@ -502,8 +536,14 @@ def _detect_role_gz(path: Path) -> str:
 
 def stage_cellranger(ctx: StageContext):
     cc = ctx.cfg.data["concurrency"]
+    tech = ctx.tech
+    try:
+        tool_dir, ref_dir = techmod.tool_paths(ctx.cfg, tech)
+    except ValueError as e:
+        raise ToolError(str(e)) from None
+    tool = techmod.TOOLS[tech][1]
     if ctx.outs.is_dir() and _validate_outs(ctx):
-        ctx.log.info("cellranger outputs already valid — skipping")
+        ctx.log.info("%s outputs already valid — skipping", tool)
     else:
         pipestance = ctx.cr_dir / ctx.sid
         # A service/drive interruption can leave a valid Martian pipestance
@@ -517,56 +557,71 @@ def stage_cellranger(ctx: StageContext):
             lock = pipestance / "_lock"
             if lock.exists():
                 lock.unlink()
-            ctx.log.info("interrupted Cell Ranger pipestance found — resuming")
+            ctx.log.info("interrupted %s pipestance found — resuming", tool)
         else:
             rm_rf(pipestance)
-        analysis_fastqs = ctx.fastq_dir
-        policies = ctx.cfg.get("metadata", "paired_only_runs", default={}) or {}
-        lanes = {f"L{i:03d}": dict(policies[srr], run=srr)
-                 for i, srr in enumerate(ctx.sample["srrs"], 1) if srr in policies}
-        if lanes:
-            from .paired_input import prepare
-            analysis_fastqs = ctx.work / "cellranger_fastq"
-            decision = prepare(ctx.fastq_dir, analysis_fastqs, ctx.sid, lanes, ctx.log)
-            ctx.state.update_meta(ctx.sid, paired_input_decision=decision)
-            ctx.sample["meta"]["paired_input_decision"] = decision
-            ctx.log.info("Using audited paired-only analysis inputs; original FASTQs retained")
-        ctx.runner.cellranger_count(
-            ctx.sid, analysis_fastqs, ctx.cr_dir, ctx.cfg.path("reference_dir"),
-            int(cc["cellranger_cores"]), int(cc["cellranger_mem_gb"]),
-            bool(ctx.cfg.get("pipeline", "create_bam", default=True)), ctx.log)
+        cores, mem = int(cc["cellranger_cores"]), int(cc["cellranger_mem_gb"])
+        ctx.log.info("tech=%s -> %s count", tech, tool)
+        if tech == techmod.ATAC:
+            ctx.runner.cellranger_atac_count(
+                ctx.sid, ctx.fastq_dir, ctx.cr_dir, ref_dir, cores, mem, ctx.log)
+        elif tech == techmod.MULTIOME:
+            prefixes = techmod.sample_prefixes(ctx.sample)
+            ctx.runner.cellranger_arc_count(
+                ctx.sid, ctx.fastq_dir, ctx.cr_dir, ref_dir, cores, mem,
+                prefixes[techmod.GEX_LIB], prefixes[techmod.ATAC_LIB],
+                bool(ctx.cfg.get("pipeline", "multiome_create_bam", default=False)),
+                bool(ctx.cfg.get("pipeline", "arc_legacy_no_bam", default=False)),
+                ctx.log)
+        else:
+            analysis_fastqs = ctx.fastq_dir
+            policies = ctx.cfg.get("metadata", "paired_only_runs", default={}) or {}
+            lanes = {f"L{i:03d}": dict(policies[srr], run=srr)
+                     for i, srr in enumerate(ctx.sample["srrs"], 1) if srr in policies}
+            if lanes:
+                from .paired_input import prepare
+                analysis_fastqs = ctx.work / "cellranger_fastq"
+                decision = prepare(ctx.fastq_dir, analysis_fastqs, ctx.sid, lanes, ctx.log)
+                ctx.state.update_meta(ctx.sid, paired_input_decision=decision)
+                ctx.sample["meta"]["paired_input_decision"] = decision
+                ctx.log.info("Using audited paired-only analysis inputs; original FASTQs retained")
+            # Only labelled single-nucleus samples get an explicit intron flag,
+            # so the command for existing rna samples is unchanged.
+            extra = {"extra_args": ["--include-introns=true"]} \
+                if tech == techmod.SNRNA else {}
+            ctx.runner.cellranger_count(
+                ctx.sid, analysis_fastqs, ctx.cr_dir, ref_dir, cores, mem,
+                bool(ctx.cfg.get("pipeline", "create_bam", default=True)),
+                ctx.log, **extra)
         if not _validate_outs(ctx):
-            raise ToolError(f"cellranger outputs failed validation in {ctx.outs}")
+            raise ToolError(f"{tool} outputs failed validation in {ctx.outs}")
     ctx.state.update_meta(
         ctx.sid,
         cellranger_version=ctx.sample["meta"].get("cellranger_version")
-        or _cellranger_version(ctx),
-        reference=str(ctx.cfg.path("reference_dir")))
-    key = [ctx.outs / "web_summary.html", ctx.outs / "metrics_summary.csv"]
-    key += list((ctx.outs / "filtered_feature_bc_matrix").glob("*"))
-    return [str(p) for p in key]
+        or _tool_version(tool_dir),
+        count_tool=tool,
+        reference=str(ref_dir))
+    key = [ctx.outs / rel for rel in techmod.required_outs(tech)]
+    if techmod.is_gex_only(tech):
+        key.append(ctx.outs / "metrics_summary.csv")
+        key += list((ctx.outs / "filtered_feature_bc_matrix").glob("*"))
+    return [str(p) for p in dict.fromkeys(key)]
 
 
-def _cellranger_version(ctx) -> str:
-    vfile = ctx.cfg.path("cellranger_dir") / ".version"
+def _tool_version(tool_dir: Path) -> str:
     try:
-        return vfile.read_text().strip()
+        return (tool_dir / ".version").read_text().strip()
     except OSError:
         return "unknown"
 
 
 def _validate_outs(ctx: StageContext) -> bool:
     outs = ctx.outs
-    if not (outs / "web_summary.html").is_file():
+    tech = ctx.tech
+    if not techmod.outs_valid(outs, tech):
         return False
-    if (outs / "web_summary.html").stat().st_size == 0:
-        return False
-    mat = outs / "filtered_feature_bc_matrix"
-    for name in ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz"):
-        f = mat / name
-        if not f.is_file() or f.stat().st_size == 0:
-            return False
-    if ctx.cfg.get("pipeline", "create_bam", default=True) and \
+    if techmod.is_gex_only(tech) and \
+            ctx.cfg.get("pipeline", "create_bam", default=True) and \
             not (outs / "possorted_genome_bam.bam").is_file():
         return False
     return True
@@ -574,6 +629,9 @@ def _validate_outs(ctx: StageContext) -> bool:
 
 def stage_loom(ctx: StageContext):
     if not ctx.cfg.get("pipeline", "make_loom", default=True):
+        return []
+    if not techmod.is_gex_only(ctx.tech):
+        ctx.log.info("no loom for tech=%s — skipping", ctx.tech)
         return []
     loom = ctx.loom_dir / f"{ctx.sid}.loom"
     if loom.is_file() and _loom_ok(loom):
@@ -659,7 +717,15 @@ def stage_archiving(ctx: StageContext):
 
     # 2) full Cell Ranger outs
     res_dst = arch / "results" / "outs"
-    _copytree_resumable(ctx.outs, res_dst, ctx.log)
+    skip = ()
+    if ctx.tech == techmod.ATAC and \
+            not ctx.cfg.get("pipeline", "archive_atac_bam", default=False):
+        # cellranger-atac has no switch to skip its BAM; the fragments file is
+        # the durable deliverable, so the BAM stays out of the archive.
+        skip = techmod.BAM_GLOBS[techmod.ATAC]
+        ctx.log.info("not archiving %s (pipeline.archive_atac_bam is false)",
+                     ", ".join(skip))
+    _copytree_resumable(ctx.outs, res_dst, ctx.log, skip_top_level=skip)
     outputs.append(str(res_dst / "web_summary.html"))
 
     # 3) loom
@@ -700,12 +766,14 @@ def _copy_file_atomic(src: Path, dst: Path):
     tmp.rename(dst)
 
 
-def _copytree_resumable(src: Path, dst: Path, log):
+def _copytree_resumable(src: Path, dst: Path, log, skip_top_level=()):
     """Copy tree, skipping files already present with the same size."""
     for root, _dirs, files in __import__("os").walk(src):
         rroot = Path(root).relative_to(src)
         (dst / rroot).mkdir(parents=True, exist_ok=True)
         for name in files:
+            if name in skip_top_level and rroot == Path("."):
+                continue
             s = Path(root) / name
             d = dst / rroot / name
             if d.is_file() and d.stat().st_size == s.stat().st_size:
@@ -746,16 +814,22 @@ def stage_verifying(ctx: StageContext):
         except zipfile.BadZipFile as e:
             check("fastq_zip_integrity", False, f"unreadable zip: {e}")
 
-    for rel in ("results/outs/web_summary.html",
-                "results/outs/filtered_feature_bc_matrix/matrix.mtx.gz"):
+    if techmod.is_gex_only(ctx.tech):
+        required = ["web_summary.html", "filtered_feature_bc_matrix/matrix.mtx.gz"]
+    else:
+        required = techmod.required_outs(ctx.tech)
+    for rel in required:
+        rel = f"results/outs/{rel}"
         p = arch / rel
         check(f"archive:{rel}", p.is_file() and p.stat().st_size > 0, str(p))
 
-    # matrix + loom checksums vs working copies
-    src_mat = ctx.outs / "filtered_feature_bc_matrix" / "matrix.mtx.gz"
-    dst_mat = arch / "results" / "outs" / "filtered_feature_bc_matrix" / "matrix.mtx.gz"
+    # matrix (or fragments) + loom checksums vs working copies
+    key_rel = techmod.checksum_out(ctx.tech)
+    key_name = "matrix_sha256" if techmod.is_gex_only(ctx.tech) else "fragments_sha256"
+    src_mat = ctx.outs / key_rel
+    dst_mat = arch / "results" / "outs" / key_rel
     if src_mat.is_file() and dst_mat.is_file():
-        check("matrix_sha256", sha256_file(src_mat) == sha256_file(dst_mat))
+        check(key_name, sha256_file(src_mat) == sha256_file(dst_mat))
     paired = ctx.sample["meta"].get("paired_input_decision")
     if paired:
         try:
