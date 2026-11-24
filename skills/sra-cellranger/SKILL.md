@@ -1,6 +1,6 @@
 ---
 name: sra-cellranger
-description: Download single-cell raw FASTQ data from NCBI SRA/SRR accessions, stage Cell Ranger-compatible FASTQ names, run 10x Genomics Cell Ranger count/multi, retain result outputs, remove large cache/intermediate files, archive raw FASTQs as zip files to local/cloud storage, and generate an auditable summary report. Use when asked to process SRA/GEO single-cell RNA-seq raw reads through Cell Ranger, manage FASTQ archives, clean run artifacts, or summarize Cell Ranger results.
+description: Download single-cell raw FASTQ data from NCBI SRA/SRR accessions, stage Cell Ranger-compatible FASTQ names, run 10x Genomics Cell Ranger count/multi for scRNA-seq and snRNA-seq, Cell Ranger ATAC for snATAC-seq, or Cell Ranger ARC for Multiome (joint snATAC + snRNA), retain result outputs, remove large cache/intermediate files, archive raw FASTQs as zip files to local/cloud storage, and generate an auditable summary report. Use when asked to process SRA/GEO single-cell or single-nucleus RNA-seq, snATAC-seq/scATAC-seq, or 10x Multiome raw reads through Cell Ranger, Cell Ranger ATAC or Cell Ranger ARC, manage FASTQ archives, clean run artifacts, or summarize results.
 ---
 
 # SRA Cell Ranger
@@ -52,7 +52,123 @@ python ./scripts/sra_cellranger_pipeline.py \
   --dry-run
 ```
 
-`samples.csv` must include `accession` and `sample` columns. Optional columns: `read_map`, `expected_cells`, `chemistry`, `extra_args`.
+`samples.csv` must include `accession` and `sample` columns. Optional columns: `read_map`, `expected_cells`, `chemistry`, `extra_args`, `assay`, `library_type`.
+
+## snATAC-seq and Multiome (snATAC + snRNA)
+
+The standalone helper handles three assays, chosen per sample with the `assay`
+column (or `--assay` with `--accessions`). Read
+[references/atac_multiome_inputs.md](references/atac_multiome_inputs.md) before
+running either new assay.
+
+| Data | `assay` | Tool | Reference flag |
+| --- | --- | --- | --- |
+| scRNA-seq / snRNA-seq | `rna` (default) | `cellranger count` | `--reference` (`refdata-gex-*`) |
+| snATAC-seq | `atac` | `cellranger-atac count` | `--atac-reference` (`refdata-cellranger-arc-*`) |
+| Multiome, both modalities from the same nuclei | `multiome` | `cellranger-arc count` | `--atac-reference` |
+
+```csv
+accession,sample,assay,library_type,read_map
+SRR000010,donor1,multiome,Gene Expression,
+SRR000011,donor1,multiome,Chromatin Accessibility,auto
+SRR000020,lung_atac_1,atac,,
+SRR000030,nuclei_rna_1,rna,,
+```
+
+```bash
+python ./scripts/sra_cellranger_pipeline.py \
+  --sample-sheet samples.csv \
+  --reference /path/to/refdata-gex-GRCh38-2024-A \
+  --atac-reference /path/to/refdata-cellranger-arc-GRCh38-2020-A-2.0.0 \
+  --outdir /path/to/project/run \
+  --storage /path/to/raw_fastq_zip \
+  --localcores 16 --localmem 64 \
+  --dry-run
+```
+
+Rules that differ from the RNA workflow:
+
+1. Classify each GSM first. Multiome means one ATAC and one GEX library from
+   the same GEM well; pair them under one `sample` with `library_type` on every
+   row. snRNA and snATAC from separate nuclei preps are two samples (`rna` and
+   `atac`). `cellranger-arc` cannot run a single modality.
+2. ATAC needs three reads: R1 and R3 genomic, R2 the 16 bp cell barcode (24 bp
+   for Multiome ATAC), plus an optional 8 bp I1. SRA flags the barcode read as
+   technical, so `fasterq-dump` needs `--include-technical`; the helper adds it
+   for `atac` and `multiome`. Check lengths with
+   `scripts/inspect_fastq_reads.py --assay atac` or set `read_map` to `auto`.
+   The default ATAC map is `1=R1;2=R2;3=R3`; a four-file dump is usually
+   `1=I1;2=R1;3=R2;4=R3`.
+3. If only two long reads exist, the barcode was not deposited as FASTQ. Stop
+   and look for the submitter's original FASTQ/BAM files (SRA "Data access"
+   tab, ENA, `bamtofastq`) instead of running Cell Ranger.
+4. Multiome FASTQs are staged as `<sample>/gex/<sample>_gex_*` and
+   `<sample>/atac/<sample>_atac_*` with a generated `libraries.csv`.
+5. BAM: `cellranger-arc` gets `--create-bam=false` unless `--create-bam true`
+   is passed (`--arc-legacy-bam-flag` for ARC 2.0, which uses `--no-bam`).
+   `cellranger-atac` always writes a BAM. `expected_cells` is ignored for both.
+6. Retain the fragments file **and its `.tbi`**
+   (`fragments.tsv.gz` / `atac_fragments.tsv.gz`), peak or feature matrices,
+   `summary.csv` and `web_summary.html`. Completion is judged on `summary.csv`
+   and a non-empty fragments file, not `metrics_summary.csv`.
+7. Both tools need about 64 GB RAM for human references; set `--localmem` and
+   Docker Desktop memory to match.
+8. For snRNA-only samples keep intron counting on (default from Cell Ranger 7;
+   `--include-introns=true` otherwise).
+9. The production queue in `pipeline/scpre` routes each sample by its
+   technology label (`rna`, `snrna`, `atac`, `multiome`); see "Technology label
+   in the production queue" below. The PBS cluster mode is still `rna`/`snrna`
+   only and skips `atac`/`multiome` samples with a warning.
+
+### Technology label in the production queue
+
+Every queue sample has `meta.tech`, shown as a badge on the dashboard. Samples
+registered before the label existed count as `rna` and behave as before.
+
+| Label | Count tool | Loom | Needs in `config.yaml` `paths` |
+| --- | --- | --- | --- |
+| `rna` (default) | `cellranger count` | yes | `cellranger_dir`, `reference_dir` |
+| `snrna` | `cellranger count --include-introns=true` | yes | same |
+| `atac` | `cellranger-atac count` | no | `cellranger_atac_dir`, `atac_reference_dir` |
+| `multiome` | `cellranger-arc count` | no | `cellranger_arc_dir`, `atac_reference_dir` |
+
+Where the label comes from, highest priority first:
+
+1. `metadata.tech` in `config.yaml`, keyed by sample id or run:
+   `tech: {GSM123: atac, GSM124: snrna}`.
+2. A `tech` column added to `SraRunTable.csv`.
+3. `Assay Type` / `LibraryStrategy` = `ATAC-seq` gives `atac` automatically; a
+   GSM holding both ATAC and RNA runs gives `multiome`.
+4. `pipeline.default_tech` (default `rna`). `snrna` is never inferred; label it.
+
+Multiome with separate ATAC and GEX GSMs needs pairing into one sample:
+`metadata.multiome_pairs: {donor1: [GSM200, GSM201]}`, or a shared value in a
+`multiome_sample` column. The pair is registered under the new id and the
+member GSMs are not queued on their own. Library type per run comes from
+`Assay Type`, or `metadata.library_types: {SRR999: atac}`.
+
+Operating rules for labels:
+
+- Set labels **before** a sample starts. A changed label is applied only while
+  the sample is still queued with no work directory; afterwards it is ignored
+  with a log warning. If a pair's member GSM is already in the state database
+  as its own sample, the pair is not registered; resolve that with the user
+  rather than editing the database.
+- A wrong label fails early in `converting` with a read-role error (for
+  example an `atac` label on GEX reads). Fix the label or `metadata.read_maps`
+  (`"1=R1,2=R2,3=R3"`), then Retry; do not force roles to make it pass.
+- ATAC and Multiome FASTQs stay in the sample's one FASTQ zip. Multiome files
+  are named `<sample>_gex_*` and `<sample>_atac_*`.
+- The ATAC BAM is not archived unless `pipeline.archive_atac_bam: true`;
+  Multiome BAMs are not created unless `pipeline.multiome_create_bam: true`.
+  Verification checks the fragments file, its `.tbi`, the `.h5` matrix and
+  `summary.csv`, and checksums the fragments file against the working copy.
+- All three tools share the one Cell Ranger slot (`max_cellranger_jobs`) and
+  the same cores/memory settings; ATAC and ARC want about 64 GB.
+- `scpre add-sample --tech atac` registers ATAC FASTQs (role in the file name
+  required); Multiome is not supported in FASTQ mode.
+- The ATAC/ARC path has only been exercised with mock tools. Run one small
+  real sample of each new label and audit its outputs before a full study.
 
 ## Workflow
 
@@ -63,7 +179,7 @@ python ./scripts/sra_cellranger_pipeline.py \
    - Storage destination is writable. Supported helper targets: local directory, `s3://` via AWS CLI, `gs://` via gsutil, or any `rclone:` remote.
 
 2. Download raw reads:
-   - Use SRA Toolkit `prefetch` and `fasterq-dump --split-files`.
+   - Use SRA Toolkit `prefetch` and `fasterq-dump --split-files` (plus `--include-technical` for ATAC/Multiome, or when a barcode/index read is missing).
    - Keep download logs per accession.
    - Prefer accession-to-sample mapping from a sample sheet; do not infer biological sample grouping from accession names alone.
 
@@ -74,7 +190,7 @@ python ./scripts/sra_cellranger_pipeline.py \
    - If staged files are symlinks, Docker must also mount the real source directory at the same host path so the links resolve inside the container.
 
 4. Run Cell Ranger:
-   - Default to `cellranger count` for gene expression libraries.
+   - Default to `cellranger count` for gene expression libraries, `cellranger-atac count` for snATAC-seq, and `cellranger-arc count` for Multiome.
    - Use `cellranger multi` only when the user provides a valid multi config CSV; see `references/cellranger_inputs.md`.
    - Pass `--localcores`, `--localmem`, `--expect-cells`, `--chemistry`, and extra args only when appropriate for the dataset.
    - On Apple Silicon/macOS with 10x Linux Cell Ranger, use Docker `--platform linux/amd64`; verify `cellranger --version` inside the container before long runs.
@@ -284,11 +400,14 @@ recover, monitor, or summarize that style of project.
 
 ## Bundled Resources
 
-- `scripts/sra_cellranger_pipeline.py`: orchestrates download, staging, Cell Ranger execution, archive/upload, cleanup, and report generation. Use `--dry-run` to print actions without executing external tools.
-- `scripts/stage_10x_fastqs.py`: stage existing `{SRR}_1.fastq.gz`/`{SRR}_2.fastq.gz` files into Cell Ranger naming. Supports grouping multiple runs under one sample.
+- `scripts/sra_cellranger_pipeline.py`: orchestrates download, staging, Cell Ranger / Cell Ranger ATAC / Cell Ranger ARC execution, archive/upload, cleanup, and report generation. Use `--dry-run` to print actions without executing external tools.
+- `scripts/stage_10x_fastqs.py`: stage existing `{SRR}_1.fastq.gz`/`{SRR}_2.fastq.gz` files into Cell Ranger naming. Supports grouping multiple runs under one sample, `--read-map` for ATAC layouts, and `--sample-suffix` for Multiome libraries.
+- `scripts/inspect_fastq_reads.py`: print read lengths of split FASTQs per accession and suggest a `read_map` for `rna` or `atac`.
+- `scripts/run_cellranger_atac_arc_docker.sh`: Docker linux/amd64 wrapper for `cellranger-atac count` (`atac <sample>`) and `cellranger-arc count` (`multiome <sample>`), with barcode-read length check, generated `libraries.csv`, and compact output copy.
 - `scripts/run_cellranger_count_docker.sh`: Docker linux/amd64 `cellranger count` wrapper with symlink source mounts, version/memory preflight, optional chemistry autodetection, and compact output copy.
-- `scripts/copy_cellranger_outputs.py`: copy the compact downstream Cell Ranger artifacts from run directories into a stable results directory.
+- `scripts/copy_cellranger_outputs.py`: copy the compact downstream Cell Ranger, ATAC or ARC artifacts from run directories into a stable results directory (assay auto-detected).
 - `references/cellranger_inputs.md`: read when configuring sample sheets, read maps, `cellranger count`, `cellranger multi`, or storage destinations.
+- `references/atac_multiome_inputs.md`: read before any snATAC-seq or Multiome run: pipeline choice, read layout, `libraries.csv`, outputs to keep, failure patterns.
 
 ## Operating Rules
 
@@ -297,6 +416,8 @@ recover, monitor, or summarize that style of project.
   for that sample exist, especially loom files when `--create-bam`/velocyto was
   requested.
 - Treat SRA/GEO metadata as authoritative for sample grouping, chemistry, organism, and read layout.
+- Never pair an ATAC and a GEX accession as Multiome on name similarity alone; confirm from GEO that they share a GEM well.
+- Do not drop an ATAC fragments file's `.tbi`. In the production queue, confirm each sample's tech label before it starts; the PBS cluster mode accepts `rna`/`snrna` only.
 - For large studies, process one sample at a time or in bounded batches so failed samples do not force rerunning successful ones.
 - Prefer targeted recovery: retry only the failed sample or loom-only stage once
   Cell Ranger metrics and BAM are already valid.
