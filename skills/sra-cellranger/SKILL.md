@@ -33,9 +33,10 @@ Honor requested monitoring intervals: a four-hour cadence is not permission
 for minute-by-minute polling, repeated process waits, or status messages.
 Automatic continuation prompts do not move the next check earlier.
 
-For Windows retention, NAS verification, portable reproduction and checkpoint-safe
-recovery, follow the Windows reference. Its deployment-specific no-permanent-BAM
-policy requires explicit user authorization and complete audits before cleanup.
+Use the Windows reference for direct HTTPS configuration, checkpoint recovery,
+copy-only and release-after-verification NAS plans, and final reconciliation
+against the input CSV. Report processing, structural audit and archive
+verification counts separately. Apply the local retention policy for each plan.
 
 ## Quick Start
 
@@ -208,7 +209,7 @@ Operating rules for labels:
    - Remove SRA cache, temporary decompressed FASTQs, and Cell Ranger pipestance intermediates after confirming outputs and FASTQ archive upload.
 
 6. Archive raw FASTQs:
-   - Create one zip per sample from staged raw FASTQ `.gz` files.
+   - Archive each sample's original FASTQs, including unmatched reads when paired-only derivatives were staged. Preserve the pairing decision and original hashes.
    - Upload the zip to the requested storage destination.
    - Record checksums, zip paths, upload commands, and upload status in the report.
 
@@ -265,9 +266,8 @@ recover, monitor, or summarize that style of project.
 - If the user says newly downloaded data are in the project root, check for the
   matching SRR/SRA directory or file before launching. Do not assume every
   listed GSM has its SRR present locally.
-- If `fastq_input/<sample>` already exists and contains at least two `.fastq.gz`
-  files, a recovery run can use staged FASTQs directly with an explicit
-  "use existing FASTQ input" mode.
+- Before reusing staged FASTQs, match the complete set of expected runs,
+  lanes and read roles to the staging manifest and verify the files.
 
 ### SRA and FASTQ Validation
 
@@ -329,9 +329,9 @@ recover, monitor, or summarize that style of project.
   `/sample/velocyto/*.loom` to the mounted output directory.
 - Typical velocyto settings:
   - Normal: `-@ 4 --samtools-memory 1500`.
-  - Recovery after memory kill/exit 137: use 1 thread, lower samtools memory
+  - Recovery after confirmed memory exhaustion: use 1 thread, lower samtools memory
     such as 500 to 750 MB, and increase Docker/WSL memory before retrying.
-- Treat exit code 137 or a `Killed` line as a memory kill. Treat exit code 2
+- For exit code 137 or a `Killed` line, check the container OOM flag and host or engine events before attributing the termination to memory pressure. Treat exit code 2
   after "completed without a loom file" as an output-copy or path issue if the
   velocyto log says "Terminated Succesfully!".
 
@@ -374,13 +374,13 @@ recover, monitor, or summarize that style of project.
 - Failed fasterq-dump:
   - Check disk space and temporary directory.
   - Validate or redownload the SRA.
-  - Reuse completed `.fastq.gz` files larger than a reasonable threshold instead
-    of re-extracting.
+  - Match retained FASTQs to the expected runs and mates. Check their completion
+    manifest and test uncertain gzip streams to EOF before reusing them.
 - Failed velocyto:
   - Check whether Cell Ranger RNA outputs are already valid.
   - Check original and intermediate BAMs with `samtools quickcheck`.
   - Retry loom-only if Cell Ranger outputs are good.
-  - Lower velocyto threads/memory for exit 137, and reuse quickcheck-passing
+  - Lower velocyto threads/memory for confirmed memory exhaustion, and reuse quickcheck-passing
     filtered/cell-sorted BAMs to avoid repeated expensive sorting.
 - Docker hang or EOF:
   - Confirm whether the scheduled task, PowerShell launcher, and Docker
