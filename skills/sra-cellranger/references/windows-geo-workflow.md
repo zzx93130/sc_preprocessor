@@ -25,6 +25,11 @@ paired-only derivative logic described here.
   recovery/activation reports before acting. They are historical records;
   a lock/status file alone cannot establish a live owner.
 
+Identify the running scheduler from its service command and configuration. This
+reference covers the Python `pipeline/scpre` service with `config.yaml`. A Node
+launcher using `package.json` and `config.json` has a different state machine.
+Use the recovery and configuration procedures for the process that owns the run.
+
 ## Independent download / whole-preprocessing slots
 
 User-selected settings for this host:
@@ -72,9 +77,16 @@ keep adding one-off workers instead of enabling the independent scheduler.
 
 Use production SRA Toolkit first. Its known Windows certificate failure can
 fall back to verified HTTPS:
-`https://sra-pub-run-odp.s3.amazonaws.com/sra/<SRR>/<SRR>` with the configured
-proxy. Never bypass TLS validation; curl certificate error60 is not an ordinary
-transport retry. Do not change proxy trust or globally disable certificates.
+`https://sra-pub-run-odp.s3.amazonaws.com/sra/<SRR>/<SRR>`.
+Honor the selected network route on both the toolkit and fallback paths. For
+direct HTTPS, check the effective toolkit proxy settings and the service
+environment. In the curl fallback, put `--disable` first and pass
+`--noproxy '*'` (a literal asterisk argument) to bypass inherited proxy
+variables and curl configuration. For an explicitly selected proxy, pass its
+configured address and check that bypass rules allow the intended route.
+An empty `docker.download_proxy` alone can leave inherited settings active.
+Confirm the route with a small HTTPS request from the same runtime, checking
+the connection peer and TLS result. Keep certificate verification enabled.
 
 Preserve `<SRR>.sra.part`. Production `--continue-at -` recalculates offsets
 from retained bytes on each bounded transport retry (currently up to3 retries).
@@ -136,8 +148,8 @@ user-retained backups; remove only explicitly verified disposable targets.
 Cell Ranger metrics alone are not completion when loom was requested. Keep
 BAM enabled for this workflow. Reuse only quickcheck-passing BAM/sorted BAM;
 loom uses Linux-backed work and the implemented CB/UB filtering. Verify the
-final copied loom in the durable archive. OOM/137 warrants targeted loom
-recovery with reduced memory pressure, not an automatic whole-sample rerun.
+final copied loom in the durable archive. For exit 137, check the container OOM flag, engine events and host memory evidence.
+When they confirm memory exhaustion, reduce sort memory pressure and resume loom.
 
 Before accepting completion, cover **all expected runs** and verify:
 
@@ -210,16 +222,57 @@ Reproduction rebuilds temporary BAM from original FASTQs before loom, preserving
 approved pairing exceptions. Syntax/dry-run success is not a full biological
 reproduction test. Licensed tools, images and reference must be obtained separately.
 
-For a user-authorized fixed NAS plan, verify each retained remote file by SHA256,
-publish the sample directory and commit verification receipts before releasing
-local payload. Keep local logs/reproduction/pointer metadata. Revalidate all
-remote retained hashes before resuming interrupted local cleanup. Historical
-pre-retirement receipts may list BAM intentionally removed under the new policy;
-use current retained receipts plus original structural audits.
-Do not expand the approved sample list or touch unrelated NAS projects.
-Stop before a transfer would reduce free capacity below the user reserve
-(5% for this deployment, plus its configured margin). Preserve partial files,
-report paused_space, and do not blindly restart it.
+### Archive plans and receipts
+
+For each plan, record the sample scope, NAS destination and retained file set,
+local retention policy, and the scope and timing of any BAM/BAI retirement.
+Copy-only publication keeps the local payload. If a later request expands an
+earlier fixed plan, give the additional samples their own plan when permissions
+differ. Carry forward earlier receipts and keep local cleanup within the plan
+that authorized it. If a copy-only plan also calls BAM temporary, resolve the
+local retirement scope before deleting it.
+
+Use an archive worker configured for the deployment. Supply the source root,
+destination, SSH/SFTP path mapping, receipt location and free-space reserve
+as settings. Confirm both protocols see the same target. For each newly
+completed sample, confirm the owner has exited and the required audits passed.
+Append eligible IDs once, while the worker is idle. Check its actual process,
+plan, status, receipts and error log before starting or resuming it.
+
+Before the next file, compare projected free bytes after transfer with the
+reserve (5% plus the configured margin on the original host). At or below
+the reserve, preserve partial uploads, record `paused_space` and report the
+shortfall. Resume after confirming sufficient capacity. Stage each sample on
+the destination filesystem, verify every retained file remotely against its
+source SHA256, then publish by atomic rename and upload the receipt. Record
+the sample ID, published path, relative file names, sizes, hashes and
+verification time. Verify the published receipt before any authorized local
+release. Retain the local logs, reproduction materials and archive pointer.
+
+On an incremental append, reuse current published receipts for unchanged
+samples. Count those samples even if the new worker has copied zero files.
+Rehash files with missing, stale or conflicting verification evidence. Before
+resuming interrupted local deletion, revalidate **every retained remote file**
+against the current receipt. Historical receipts may list a BAM that was
+subsequently retired under an authorized policy.
+
+### Final batch reconciliation
+
+Derive the expected sample and run IDs from the input CSV, applying the
+registered assay grouping. Join by ID across queue state, structural audits
+and published receipts from every plan. Report missing, duplicate and
+unexpected IDs. For each expected sample check the published receipt digest
+and compare the remote relative paths and byte sizes with the retained
+manifest. For authorized BAM retirement, use the recorded pre-retirement
+BAM/index audit alongside the current receipt. Keep pairing exceptions and
+their original FASTQ hashes traceable.
+
+Report separate counts for preprocessing complete, structural audit passed
+and NAS archive verified, each against its expected scope. Record when full
+file-content hashes were verified, what the final pass checked and any
+outstanding cleanup. A receipt and inventory check can reuse transfer-time
+content verification for unchanged files. If the user requests fresh full
+content verification, recompute every retained remote file's SHA256.
 
 ## Storage diagnosis and checkpoint-safe recovery
 
@@ -234,9 +287,14 @@ cleanup. Coordinate any desktop reboot with the user; Codex cannot operate insid
 WinRE, and recovery-environment drive letters must be independently identified.
 
 After an authorized reboot/repair, inspect actual owners, disk state and retained
-checkpoints, then recover the existing service. Do not call whole-sample retry
-for interrupted Cell Ranger: the deployed retry can delete the named pipestance.
-Preserve checkpoint volumes and resume the production stage. A stopped download
+checkpoints, then recover the existing service. Trace the installed retry handler through dispatch, stage entry and cleanup.
+A handler that sets a sample to queued/ready does not establish which checkpoints
+the next stage will reuse. Identify the original named volume, check its mount
+and Martian state, and confirm there is no live owner. Use the supported resume
+path that reattaches that volume; verify the resumed stage in the log. If the
+installed version offers no demonstrably checkpoint-preserving operation,
+keep the volume and report the missing recovery path. Avoid ad hoc queue
+database edits. A stopped download
 may be retried only after diagnosing its transport/proxy and retained offset,
 with bounded secure retries; never disable TLS verification.
 Allocate WSL memory above Cell Ranger's limit, leave host headroom, bound crash
