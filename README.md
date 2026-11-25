@@ -12,6 +12,18 @@ This repository is private. The owner must grant colleagues access before they
 can clone it. No public/open-source license is asserted here; third-party tools
 retain their respective licensing and must be obtained separately.
 
+## Technology label (RNA / snRNA / ATAC / Multiome)
+
+Each queue sample carries a `tech` label that selects the count tool:
+`rna` (default) and `snrna` use `cellranger count`, `atac` uses
+`cellranger-atac count`, `multiome` uses `cellranger-arc count`. Set it with
+`metadata.tech` in `config.yaml` or a `tech` column in `SraRunTable.csv`;
+ATAC runs are also recognised from `Assay Type`. Pair separate Multiome GSMs
+with `metadata.multiome_pairs`. ATAC and Multiome need `paths.cellranger_atac_dir`
+/ `paths.cellranger_arc_dir` and `paths.atac_reference_dir`. Details:
+[skill](skills/sra-cellranger/SKILL.md). The ATAC/Multiome path is covered by
+mock-tool tests only; validate one real sample first.
+
 ## Verification scope
 
 The Python regression tests exercise queue scheduling, recovery, input handling

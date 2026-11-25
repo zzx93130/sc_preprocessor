@@ -390,3 +390,11 @@ def test_cluster_fastq_ingest_is_checksummed_and_manifested(tmp_path):
         Path(attempt["manifest_path"]), attempt["manifest_sha256"]
     )
     assert manifest["inputs"][0]["kind"] == "fastq"
+
+
+def test_worker_manifest_carries_the_tech_label(tmp_path):
+    cfg, state, manager, _shared = cluster_env(tmp_path)
+    cfg.data["metadata"] = {**cfg.data["metadata"], "tech": {"GSM1": "snrna"}}
+    assert manager.scan_inbox() == 1
+    document = manager._manifest_document(state.get_sample("GSM1"), "attempt-1", 0)
+    assert document["metadata"]["tech"] == "snrna"

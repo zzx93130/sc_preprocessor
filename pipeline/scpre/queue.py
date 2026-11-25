@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from . import sra_table, stages
+from . import tech as techmod
 from .docker_run import make_runner
 from .space import SpaceError, preflight
 from .stages import (PauseError, ShutdownError, StageContext, clean_partial,
@@ -35,6 +36,7 @@ class Queue:
         self._space_reservations = {}
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._warned = set()
 
     # ---- registration ---------------------------------------------------
     def scan_inbox(self) -> int:
@@ -46,7 +48,7 @@ class Queue:
         if not table:
             return 0
         try:
-            groups = sra_table.parse(table)
+            groups = sra_table.resolve_tech(sra_table.parse(table), self.cfg)
         except ValueError as e:
             log.warning("SraRunTable parse problem: %s", e)
             return 0
@@ -58,6 +60,20 @@ class Queue:
                 sizes = grp["meta"].get("run_bytes", {})
                 if sizes and existing["meta"].get("run_bytes") != sizes:
                     self.state.update_meta(sid, run_bytes=sizes)
+                self._relabel_if_untouched(existing, grp)
+                continue
+            # A Multiome sample replaces its member GSMs. If a member was
+            # already registered on its own, do not process the reads twice.
+            clash = [m for m in grp["meta"].get("multiome_members", [])
+                     if self.state.get_sample(m)]
+            if clash:
+                key = f"{sid}:{','.join(clash)}"
+                if key not in self._warned:
+                    self._warned.add(key)
+                    log.warning(
+                        "multiome sample %s not registered: %s already exist(s) "
+                        "as separate sample(s) in the state database", sid,
+                        ", ".join(clash))
                 continue
             present = {}
             for srr in grp["srrs"]:
@@ -78,19 +94,79 @@ class Queue:
             self.state.upsert_sample(
                 sid, project=self.cfg.project, mode="sra",
                 srrs=grp["srrs"], status="queued", stage="queued", meta=meta)
-            log.info("registered sample %s (%d runs, %d local)",
-                     sid, len(grp["srrs"]), len(present))
+            log.info("registered sample %s tech=%s (%d runs, %d local)",
+                     sid, meta.get("tech"), len(grp["srrs"]), len(present))
             new += 1
         return new
 
-    def add_fastq_sample(self, sample_id: str, fastq_paths, meta=None) -> None:
+    def _relabel_if_untouched(self, existing: dict, grp: dict) -> None:
+        """Apply a changed tech label or library assignment while it is safe.
+
+        Safe means nothing has run yet, or the sample failed before its count
+        step finished. In the second case the staged FASTQs were named for the
+        old label, so they are dropped and conversion is redone on Retry.
+        """
+        new_tech = grp["meta"].get("tech")
+        new_libs = grp["meta"].get("library_types")
+        old_tech = techmod.sample_tech(existing)
+        old_libs = existing["meta"].get("library_types")
+        if not new_tech or (old_tech == new_tech and (old_libs or None) == (new_libs or None)):
+            return
+        sid = existing["id"]
+        work = self.cfg.work_dir / sid
+        untouched = existing["status"] == "queued" and \
+            existing["stage"] == "queued" and not work.exists()
+        failed_early = existing["status"] == "failed" and \
+            sid not in self.workers and \
+            not (work / ".stages" / "cellranger.json").exists()
+        if not (untouched or failed_early):
+            key = f"relabel:{sid}:{new_tech}:{new_libs}"
+            if key not in self._warned:
+                self._warned.add(key)
+                log.warning(
+                    "sample %s keeps tech=%s: it has already started, so the "
+                    "new label %s is ignored", sid, old_tech, new_tech)
+            return
+        if techmod.MULTIOME in (new_tech, old_tech) \
+                and sorted(existing["srrs"]) != sorted(grp["srrs"]):
+            return
+        if failed_early:
+            from .util import rm_rf
+            for stale in (work / "fastq", work / "cellranger_fastq",
+                          work / "cellranger",
+                          work / ".stages" / "converting.json"):
+                rm_rf(stale)
+        self.state.update_meta(sid, tech=new_tech, library_types=new_libs)
+        log.info("sample %s relabelled tech=%s library_types=%s%s", sid,
+                 new_tech, new_libs,
+                 "; staged FASTQs dropped, Retry to reconvert" if failed_early else "")
+
+    def add_fastq_sample(self, sample_id: str, fastq_paths, meta=None,
+                         tech: str = "") -> None:
         m = dict(meta or {})
+        m["tech"] = techmod.normalize_tech(
+            tech or m.get("tech")
+            or self.cfg.get("pipeline", "default_tech", default=techmod.RNA))
+        if m["tech"] == techmod.MULTIOME:
+            raise ValueError(
+                "multiome samples cannot be added in FASTQ mode; register "
+                "them from an SraRunTable")
         m["input_paths"] = [str(Path(p).resolve()) for p in fastq_paths]
         self.state.upsert_sample(
             sample_id, project=self.cfg.project, mode="fastq", srrs=[],
             status="queued", stage="queued", meta=m)
         log.info("registered FASTQ sample %s (%d files)",
                  sample_id, len(m["input_paths"]))
+
+    def _optional_tool_paths(self) -> list:
+        """Configured ATAC/ARC tool and reference directories, if any."""
+        out = []
+        for key in ("cellranger_atac_dir", "cellranger_arc_dir",
+                    "atac_reference_dir"):
+            raw = self.cfg.get("paths", key, default="")
+            if raw:
+                out.append(Path(raw).expanduser())
+        return out
 
     # ---- pause management ----------------------------------------------
     def paused_reason(self):
@@ -123,6 +199,7 @@ class Queue:
             mount_err = self.runner.mounts_healthy([
                 self.cfg.path("cellranger_dir"),
                 self.cfg.path("reference_dir"),
+                *self._optional_tool_paths(),
                 self.cfg.path("inbox_dir"),
             ])
             if mount_err:
@@ -212,6 +289,7 @@ class Queue:
             mount_err = self.runner.mounts_healthy([
                 self.cfg.path("cellranger_dir"),
                 self.cfg.path("reference_dir"),
+                *self._optional_tool_paths(),
                 self.cfg.path("inbox_dir"),
             ])
             if mount_err:

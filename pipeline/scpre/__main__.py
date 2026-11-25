@@ -114,7 +114,7 @@ def cmd_add_sample(args):
     paths = [p for p in paths if p.is_file()]
     if not paths:
         sys.exit(f"no FASTQ files matched: {args.fastq}")
-    q.add_fastq_sample(args.sample, paths)
+    q.add_fastq_sample(args.sample, paths, tech=args.tech)
     print(f"added {args.sample} with {len(paths)} FASTQ file(s); "
           "it will start on the next queue tick (service must be running)")
 
@@ -264,6 +264,9 @@ def main():
     p.add_argument("--sample", required=True, help="sample name")
     p.add_argument("--fastq", nargs="+", required=True,
                    help="FASTQ files, globs, or a directory")
+    p.add_argument("--tech", default="", choices=["", "rna", "snrna", "atac"],
+                   help="technology label (default: pipeline.default_tech); "
+                        "ATAC FASTQs must be named with _R1_/_R2_/_R3_")
     p.set_defaults(func=cmd_add_sample)
 
     p = sub.add_parser("status", help="print sample table")

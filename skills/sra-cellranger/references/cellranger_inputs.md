@@ -13,7 +13,9 @@ SRR000003,control_1
 
 Optional columns:
 
-- `read_map`: comma-separated mapping from SRA read number to Cell Ranger role, such as `1=R1,2=R2` or `1=I1,2=R1,3=R2`.
+- `read_map`: mapping from SRA read number to Cell Ranger role, such as `1=R1;2=R2` or `1=I1;2=R1;3=R2`. Inside a CSV use semicolons, or quote the comma form (`"1=R1,2=R2"`). `auto` infers roles from read lengths. The value applies to its own accession row.
+- `assay`: `rna` (default), `atac`, or `multiome`; see [atac_multiome_inputs.md](atac_multiome_inputs.md).
+- `library_type`: `Gene Expression` or `Chromatin Accessibility`; required on `multiome` rows.
 - `expected_cells`: value for `cellranger count --expect-cells`.
 - `chemistry`: value for `cellranger count --chemistry`.
 - `extra_args`: additional Cell Ranger arguments for one sample. Keep this simple; avoid shell quoting tricks in CSV.

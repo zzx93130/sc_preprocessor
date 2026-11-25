@@ -567,12 +567,70 @@ class DockerRunner:
 
     def cellranger_count(self, sample: str, fastq_dir: Path, run_dir: Path,
                          ref_dir: Path, cores: int, mem_gb: int,
-                         create_bam: bool, logger):
-        run_dir.mkdir(parents=True, exist_ok=True)
-        cr_dir = self.cfg.path("cellranger_dir")
+                         create_bam: bool, logger, extra_args=()):
         cr_source = self.cfg.get(
             "docker", "cellranger_volume", default=""
-        ) or cr_dir
+        ) or self.cfg.path("cellranger_dir")
+        return self._tenx_count(
+            "cellranger", cr_source, sample, fastq_dir, run_dir, ref_dir,
+            ["--fastqs=/fastq", f"--sample={sample}", "--transcriptome=/ref"],
+            cores, mem_gb,
+            [f"--create-bam={'true' if create_bam else 'false'}",
+             *extra_args],
+            logger, use_overrides=True)
+
+    def cellranger_atac_count(self, sample: str, fastq_dir: Path,
+                              run_dir: Path, ref_dir: Path, cores: int,
+                              mem_gb: int, logger):
+        """snATAC-seq: cellranger-atac count on R1/R2(barcode)/R3 FASTQs."""
+        source = self.cfg.get(
+            "docker", "cellranger_atac_volume", default=""
+        ) or self.cfg.path("cellranger_atac_dir")
+        return self._tenx_count(
+            "cellranger-atac", source, sample, fastq_dir, run_dir, ref_dir,
+            ["--fastqs=/fastq", f"--sample={sample}", "--reference=/ref"],
+            cores, mem_gb, [], logger)
+
+    def cellranger_arc_count(self, sample: str, fastq_dir: Path,
+                             run_dir: Path, ref_dir: Path, cores: int,
+                             mem_gb: int, gex_prefix: str, atac_prefix: str,
+                             create_bam: bool, legacy_no_bam: bool, logger):
+        """Multiome: cellranger-arc count on GEX + ATAC libraries.
+
+        Both libraries live in the same FASTQ directory and are told apart by
+        their sample prefix in the generated libraries CSV.
+        """
+        run_dir.mkdir(parents=True, exist_ok=True)
+        libraries = run_dir / f"{sample}.libraries.csv"
+        libraries.write_text(
+            "fastqs,sample,library_type\n"
+            f"/fastq,{gex_prefix},Gene Expression\n"
+            f"/fastq,{atac_prefix},Chromatin Accessibility\n")
+        if legacy_no_bam:  # Cell Ranger ARC 2.0
+            bam_args = [] if create_bam else ["--no-bam"]
+        else:
+            bam_args = [f"--create-bam={'true' if create_bam else 'false'}"]
+        source = self.cfg.get(
+            "docker", "cellranger_arc_volume", default=""
+        ) or self.cfg.path("cellranger_arc_dir")
+        return self._tenx_count(
+            "cellranger-arc", source, sample, fastq_dir, run_dir, ref_dir,
+            ["--libraries=/libraries.csv", "--reference=/ref"],
+            cores, mem_gb, bam_args, logger,
+            extra_mounts=[(libraries, "/libraries.csv", True)])
+
+    def _tenx_count(self, tool: str, tool_source, sample: str,
+                    fastq_dir: Path, run_dir: Path, ref_dir: Path,
+                    input_args, cores: int, mem_gb: int, tail_args, logger,
+                    use_overrides: bool = False, extra_mounts=()):
+        """Run ``<tool> count`` for one sample and return its outs directory.
+
+        Shared by cellranger, cellranger-atac and cellranger-arc. The
+        container is always labelled "cellranger" so job adoption, monitoring
+        and the max_cellranger_jobs limit cover all three tools.
+        """
+        run_dir.mkdir(parents=True, exist_ok=True)
+        cr_source = tool_source
         work_volume = self._cellranger_work_volume(sample)
         work_source = work_volume or run_dir
         image = self.cfg.get("docker", "cellranger_image")
@@ -629,7 +687,9 @@ class DockerRunner:
         else:
             override_mounts = []
             override_args = []
-            override_setting = self.cfg.get("docker", "cellranger_overrides", default="")
+            override_setting = self.cfg.get(
+                "docker", "cellranger_overrides", default=""
+            ) if use_overrides else ""
             if override_setting:
                 override_path = Path(override_setting)
                 if not override_path.is_absolute():
@@ -644,12 +704,12 @@ class DockerRunner:
                 platform,
                 [(cr_source, "/opt/cellranger", True), (ref_dir, "/ref", True),
                  (fastq_dir, "/fastq", True),
-                 (work_source, "/work", False)] + override_mounts,
-                ["/opt/cellranger/cellranger", "count",
-                 f"--id={sample}", "--fastqs=/fastq", f"--sample={sample}",
-                 "--transcriptome=/ref",
+                 (work_source, "/work", False)] + override_mounts
+                + list(extra_mounts),
+                [f"/opt/cellranger/{tool}", "count",
+                 f"--id={sample}", *input_args,
                  f"--localcores={cores}", f"--localmem={mem_gb}",
-                 f"--create-bam={'true' if create_bam else 'false'}",
+                 *tail_args,
                  "--disable-ui"] + override_args,
                 container_name(sample, "cellranger"), logger,
                 workdir="/work", env={"TMPDIR": "/work/tmp"})
@@ -660,7 +720,7 @@ class DockerRunner:
             )
         outs = run_dir / sample / "outs"
         if not outs.is_dir():
-            raise ToolError(f"cellranger finished but {outs} is missing")
+            raise ToolError(f"{tool} finished but {outs} is missing")
         return outs
 
     def velocyto(self, sample: str, outs_dir: Path, gtf_path: Path,
@@ -821,6 +881,8 @@ class MockRunner:
         self.defer_cleanup = False
         self.external_containers = []
         self.desktop_restarts = 0
+        self.read_layouts = {}  # {run: [read lengths]} for fasterq
+        self.calls = []         # count invocations, for tests
 
     def healthy(self) -> bool:
         return True
@@ -892,12 +954,17 @@ class MockRunner:
         out_dir.mkdir(parents=True, exist_ok=True)
         stem = sra_path.stem
         seed = hash(stem) & 0xFFFF
-        f1 = out_dir / f"{stem}_1.fastq"   # 28 bp -> R1 (CB+UMI)
-        f2 = out_dir / f"{stem}_2.fastq"   # 90 bp -> R2 (cDNA)
-        self._write_fastq(f1, 200, 28, seed)
-        self._write_fastq(f2, 200, 90, seed + 1)
-        logger.info("mock fasterq-dump -> %s, %s", f1.name, f2.name)
-        return [f1, f2], 200
+        # default: 28 bp -> R1 (CB+UMI), 90 bp -> R2 (cDNA). Tests may set
+        # read_layouts[run] = [lengths...] to emulate other chemistries.
+        lengths = self.read_layouts.get(stem, [28, 90])
+        files = []
+        for i, length in enumerate(lengths, start=1):
+            f = out_dir / f"{stem}_{i}.fastq"
+            self._write_fastq(f, 200, length, seed + i - 1)
+            files.append(f)
+        logger.info("mock fasterq-dump -> %s",
+                    ", ".join(f.name for f in files))
+        return files, 200
 
     def compress(self, paths, threads, sample, logger):
         out = []
@@ -909,10 +976,77 @@ class MockRunner:
             out.append(gz)
         return out
 
+    def _require_fastqs(self, tool, fastq_dir: Path, prefix, roles):
+        for role in roles:
+            if not list(fastq_dir.glob(f"{prefix}_S1_L*_{role}_001.fastq.gz")):
+                raise ToolError(
+                    f"mock {tool}: no {prefix}_S1_L*_{role}_001.fastq.gz in "
+                    f"{fastq_dir}")
+
+    def cellranger_atac_count(self, sample, fastq_dir: Path, run_dir: Path,
+                              ref_dir, cores, mem_gb, logger):
+        if self.fail_stage == "cellranger":
+            raise ToolError("mock cellranger-atac failure (injected)")
+        self._require_fastqs("cellranger-atac", fastq_dir, sample,
+                             ("R1", "R2", "R3"))
+        self.calls.append(("cellranger-atac", sample, str(ref_dir)))
+        outs = run_dir / sample / "outs"
+        outs.mkdir(parents=True, exist_ok=True)
+        (outs / "web_summary.html").write_text(
+            f"<html><body><h1>Mock ATAC web_summary for {sample}</h1></body></html>")
+        (outs / "summary.csv").write_text(
+            "Estimated number of cells,TSS enrichment score\n1000,8.5\n")
+        with gzip.open(outs / "fragments.tsv.gz", "wb") as f:
+            f.write(b"chr1\t10\t200\tAAACGAAAGAAACGCC-1\t1\n" * 32)
+        (outs / "fragments.tsv.gz.tbi").write_bytes(b"TBI\x01" + os.urandom(64))
+        (outs / "filtered_peak_bc_matrix.h5").write_bytes(
+            b"\x89HDF\r\n\x1a\n" + os.urandom(256))
+        (outs / "peaks.bed").write_text("chr1\t10\t200\n")
+        (outs / "possorted_bam.bam").write_bytes(b"BAM\x01" + os.urandom(1024))
+        (outs / "possorted_bam.bam.bai").write_bytes(b"BAI\x01" + os.urandom(64))
+        logger.info("mock cellranger-atac count -> %s", outs)
+        return outs
+
+    def cellranger_arc_count(self, sample, fastq_dir: Path, run_dir: Path,
+                             ref_dir, cores, mem_gb, gex_prefix, atac_prefix,
+                             create_bam, legacy_no_bam, logger):
+        if self.fail_stage == "cellranger":
+            raise ToolError("mock cellranger-arc failure (injected)")
+        self._require_fastqs("cellranger-arc", fastq_dir, gex_prefix,
+                             ("R1", "R2"))
+        self._require_fastqs("cellranger-arc", fastq_dir, atac_prefix,
+                             ("R1", "R2", "R3"))
+        self.calls.append(("cellranger-arc", sample, str(ref_dir),
+                           gex_prefix, atac_prefix, create_bam))
+        outs = run_dir / sample / "outs"
+        mat = outs / "filtered_feature_bc_matrix"
+        mat.mkdir(parents=True, exist_ok=True)
+        (outs / "web_summary.html").write_text(
+            f"<html><body><h1>Mock ARC web_summary for {sample}</h1></body></html>")
+        (outs / "summary.csv").write_text(
+            "Estimated number of cells,GEX Median genes per cell\n1000,2000\n")
+        for name in ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz"):
+            with gzip.open(mat / name, "wb") as f:
+                f.write(b"mock-tsv-content\n" * 32)
+        (outs / "filtered_feature_bc_matrix.h5").write_bytes(
+            b"\x89HDF\r\n\x1a\n" + os.urandom(256))
+        with gzip.open(outs / "atac_fragments.tsv.gz", "wb") as f:
+            f.write(b"chr1\t10\t200\tAAACGAAAGAAACGCC-1\t1\n" * 32)
+        (outs / "atac_fragments.tsv.gz.tbi").write_bytes(
+            b"TBI\x01" + os.urandom(64))
+        if create_bam:
+            for name in ("gex_possorted_bam.bam", "atac_possorted_bam.bam"):
+                (outs / name).write_bytes(b"BAM\x01" + os.urandom(1024))
+        logger.info("mock cellranger-arc count -> %s", outs)
+        return outs
+
     def cellranger_count(self, sample, fastq_dir: Path, run_dir: Path,
-                         ref_dir, cores, mem_gb, create_bam, logger):
+                         ref_dir, cores, mem_gb, create_bam, logger,
+                         extra_args=()):
         if self.fail_stage == "cellranger":
             raise ToolError("mock cellranger failure (injected)")
+        self.calls.append(("cellranger", sample, str(ref_dir),
+                           tuple(extra_args)))
         fq = sorted(fastq_dir.glob(f"{sample}_S1_L*_R1_001.fastq.gz"))
         if not fq:
             raise ToolError(f"mock cellranger: no correctly named FASTQs for "

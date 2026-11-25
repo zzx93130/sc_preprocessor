@@ -25,6 +25,10 @@ DEFAULTS = {
     "paths": {
         "cellranger_dir": "",
         "reference_dir": "",
+        # Optional: only needed for samples labelled atac / multiome.
+        "cellranger_atac_dir": "",
+        "cellranger_arc_dir": "",
+        "atac_reference_dir": "",  # Cell Ranger ARC reference; serves both tools
         "work_root": "",      # working SSD: all intermediates/temp
         "archive_root": "",   # Seagate: durable archive
         "inbox_dir": "",      # where .sra / fastq inputs arrive
@@ -77,10 +81,17 @@ DEFAULTS = {
         "create_bam": True,           # required for velocyto
         "make_loom": True,
         "chemistry": "auto",
+        "default_tech": "rna",        # rna | snrna | atac | multiome
+        "multiome_create_bam": False,  # cellranger-arc --create-bam
+        "arc_legacy_no_bam": False,   # Cell Ranger ARC 2.0: --no-bam, no --create-bam
+        "archive_atac_bam": False,    # cellranger-atac always writes a BAM
     },
     "metadata": {
         "sra_run_table": "",          # explicit path; else auto-discovered
         "read_maps": {},              # e.g. {"SRR123": "1=I1,2=R1,3=R2"}
+        "tech": {},                   # e.g. {"GSM123": "atac", "GSM124": "snrna"}
+        "multiome_pairs": {},         # e.g. {"donor1": ["GSM_gex", "GSM_atac"]}
+        "library_types": {},          # e.g. {"SRR123": "atac"} for multiome runs
     },
     "tools": {"mode": "docker"},      # docker | apptainer | mock
     "cluster": {
@@ -229,6 +240,24 @@ def validate_reference_dir(p: Path) -> str:
     genes = p / "genes"
     if not genes.is_dir():
         return f"{p} has no genes/ directory (GTF needed for velocyto)"
+    return ""
+
+
+def validate_tool_dir(p: Path, exe: str) -> str:
+    if not p.is_dir():
+        return f"{p} is not a directory"
+    if not (p / exe).exists() and not (p / "bin" / exe).exists():
+        return f"no `{exe}` executable found under {p}"
+    return ""
+
+
+def validate_atac_reference_dir(p: Path) -> str:
+    if not p.is_dir():
+        return f"{p} is not a directory"
+    if not (p / "reference.json").exists():
+        return f"{p} has no reference.json (not a 10x reference?)"
+    if not (p / "fasta").is_dir():
+        return f"{p} has no fasta/ directory (not a Cell Ranger ARC/ATAC reference?)"
     return ""
 
 

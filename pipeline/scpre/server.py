@@ -87,6 +87,7 @@ def _sample_view(cfg, state, s: dict) -> dict:
         "updated_at": s["updated_at"],
         "meta": {k: meta.get(k) for k in
                  ("gsm", "organism", "instrument", "read_counts",
+                   "tech", "library_types", "multiome_members", "count_tool",
                    "cellranger_version", "reference", "archive_dir",
                    "space_estimate", "library_strategy", "cleanup_pending",
                    "cleanup_requested_at", "cleanup_completed_at",

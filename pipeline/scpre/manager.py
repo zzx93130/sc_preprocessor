@@ -23,6 +23,7 @@ TERMINAL_ATTEMPTS = {"completed", "failed", "interrupted", "cancelled"}
 
 class ClusterManager:
     def __init__(self, cfg, state, executor=None):
+        self._unsupported_tech = set()
         self.cfg = cfg
         self.state = state
         cluster = cfg.data["cluster"]
@@ -131,7 +132,7 @@ class ClusterManager:
         if not table:
             return 0
         try:
-            groups = sra_table.parse(table)
+            groups = sra_table.resolve_tech(sra_table.parse(table), self.cfg)
         except ValueError as exc:
             log.warning("SraRunTable parse problem: %s", exc)
             return 0
@@ -143,6 +144,15 @@ class ClusterManager:
         created = 0
         for sample_id, group in groups.items():
             if self.state.get_sample(sample_id):
+                continue
+            if group["meta"].get("tech") in ("atac", "multiome"):
+                # Cluster workers only carry the GEX tool chain so far.
+                if sample_id not in self._unsupported_tech:
+                    self._unsupported_tech.add(sample_id)
+                    log.warning(
+                        "sample %s (tech=%s) skipped: cluster mode supports "
+                        "rna/snrna only; use the local Docker queue",
+                        sample_id, group["meta"]["tech"])
                 continue
             records = {}
             for srr in group["srrs"]:
@@ -513,7 +523,8 @@ class ClusterManager:
             },
             "metadata": {
                 key: sample["meta"].get(key) for key in (
-                    "gsm", "organism", "instrument", "library_strategy"
+                    "gsm", "organism", "instrument", "library_strategy",
+                    "tech",
                 )
             },
             "archive": {
