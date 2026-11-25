@@ -118,7 +118,8 @@ Rules that differ from the RNA workflow:
 9. The production queue in `pipeline/scpre` routes each sample by its
    technology label (`rna`, `snrna`, `atac`, `multiome`); see "Technology label
    in the production queue" below. The PBS cluster mode is still `rna`/`snrna`
-   only and skips `atac`/`multiome` samples with a warning.
+   only (the label is passed to the worker) and skips `atac`/`multiome`
+   samples with a warning.
 
 ### Technology label in the production queue
 
@@ -149,14 +150,17 @@ member GSMs are not queued on their own. Library type per run comes from
 
 Operating rules for labels:
 
-- Set labels **before** a sample starts. A changed label is applied only while
-  the sample is still queued with no work directory; afterwards it is ignored
-  with a log warning. If a pair's member GSM is already in the state database
-  as its own sample, the pair is not registered; resolve that with the user
-  rather than editing the database.
+- Set labels **before** a sample starts. A changed label or
+  `metadata.library_types` entry is applied on the next inbox scan in two
+  cases only: the sample is still queued with no work directory, or it has
+  failed before its count step completed. In the failed case its staged
+  FASTQs are dropped and Retry reconverts them under the new label. Any later
+  change is ignored with a log warning. If a pair's member GSM is already in
+  the state database as its own sample, the pair is not registered; resolve
+  that with the user rather than editing the database.
 - A wrong label fails early in `converting` with a read-role error (for
   example an `atac` label on GEX reads). Fix the label or `metadata.read_maps`
-  (`"1=R1,2=R2,3=R3"`), then Retry; do not force roles to make it pass.
+  (`"1=R1,2=R2,3=R3"`), rescan, then Retry; do not force roles to make it pass.
 - ATAC and Multiome FASTQs stay in the sample's one FASTQ zip. Multiome files
   are named `<sample>_gex_*` and `<sample>_atac_*`.
 - The ATAC BAM is not archived unless `pipeline.archive_atac_bam: true`;

@@ -189,3 +189,29 @@ def test_label_change_applies_only_before_work_starts(tmp_path):
 def test_unlabelled_legacy_sample_is_rna():
     assert tech.sample_tech({"meta": {}}) == "rna"
     assert sra_table.parse_read_map("1=R1;2=R2;3=R3") == {1: "R1", 2: "R2", 3: "R3"}
+
+
+def test_library_assignment_refreshes_for_untouched_multiome(tmp_path):
+    table = ("Run,Sample Name,Assay Type,tech\n"
+             "SRR5,GSM5,RNA-Seq,multiome\nSRR6,GSM5,RNA-Seq,multiome\n")
+    cfg, state, _runner, queue = project(tmp_path, table=table, runs=("SRR5", "SRR6"))
+    queue.scan_inbox()
+    assert state.get_sample("GSM5")["meta"]["library_types"] == {"SRR5": "gex", "SRR6": "gex"}
+    cfg.data["metadata"]["library_types"] = {"SRR6": "atac"}
+    queue.scan_inbox()
+    assert state.get_sample("GSM5")["meta"]["library_types"] == {"SRR5": "gex", "SRR6": "atac"}
+    assert drain(queue, state)["GSM5"]["status"] == "done"
+
+
+def test_label_fix_after_early_failure_takes_effect_on_retry(tmp_path):
+    table = "Run,Sample Name,Assay Type\nSRR3,GSM3,RNA-Seq\n"   # ATAC reads, mislabelled
+    cfg, state, runner, queue = project(tmp_path, table=table, runs=("SRR3",))
+    queue.scan_inbox()
+    assert drain(queue, state)["GSM3"]["status"] == "failed"
+    cfg.data["metadata"]["tech"] = {"GSM3": "atac"}
+    queue.scan_inbox()
+    assert state.get_sample("GSM3")["meta"]["tech"] == "atac"
+    assert not queue.retry("GSM3")
+    done = drain(queue, state)["GSM3"]
+    assert done["status"] == "done", done["error"]
+    assert runner.calls[-1][0] == "cellranger-atac"

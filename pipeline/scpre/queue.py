@@ -100,27 +100,46 @@ class Queue:
         return new
 
     def _relabel_if_untouched(self, existing: dict, grp: dict) -> None:
-        """Apply a changed tech label only while nothing has run for a sample."""
+        """Apply a changed tech label or library assignment while it is safe.
+
+        Safe means nothing has run yet, or the sample failed before its count
+        step finished. In the second case the staged FASTQs were named for the
+        old label, so they are dropped and conversion is redone on Retry.
+        """
         new_tech = grp["meta"].get("tech")
-        if not new_tech or techmod.sample_tech(existing) == new_tech:
+        new_libs = grp["meta"].get("library_types")
+        old_tech = techmod.sample_tech(existing)
+        old_libs = existing["meta"].get("library_types")
+        if not new_tech or (old_tech == new_tech and (old_libs or None) == (new_libs or None)):
             return
-        if existing["status"] != "queued" or existing["stage"] != "queued" \
-                or (self.cfg.work_dir / existing["id"]).exists():
-            key = f"relabel:{existing['id']}:{new_tech}"
+        sid = existing["id"]
+        work = self.cfg.work_dir / sid
+        untouched = existing["status"] == "queued" and \
+            existing["stage"] == "queued" and not work.exists()
+        failed_early = existing["status"] == "failed" and \
+            sid not in self.workers and \
+            not (work / ".stages" / "cellranger.json").exists()
+        if not (untouched or failed_early):
+            key = f"relabel:{sid}:{new_tech}:{new_libs}"
             if key not in self._warned:
                 self._warned.add(key)
                 log.warning(
                     "sample %s keeps tech=%s: it has already started, so the "
-                    "new label %s is ignored", existing["id"],
-                    techmod.sample_tech(existing), new_tech)
+                    "new label %s is ignored", sid, old_tech, new_tech)
             return
-        if techmod.MULTIOME in (new_tech, techmod.sample_tech(existing)) \
+        if techmod.MULTIOME in (new_tech, old_tech) \
                 and sorted(existing["srrs"]) != sorted(grp["srrs"]):
             return
-        self.state.update_meta(
-            existing["id"], tech=new_tech,
-            library_types=grp["meta"].get("library_types"))
-        log.info("sample %s relabelled tech=%s", existing["id"], new_tech)
+        if failed_early:
+            from .util import rm_rf
+            for stale in (work / "fastq", work / "cellranger_fastq",
+                          work / "cellranger",
+                          work / ".stages" / "converting.json"):
+                rm_rf(stale)
+        self.state.update_meta(sid, tech=new_tech, library_types=new_libs)
+        log.info("sample %s relabelled tech=%s library_types=%s%s", sid,
+                 new_tech, new_libs,
+                 "; staged FASTQs dropped, Retry to reconvert" if failed_early else "")
 
     def add_fastq_sample(self, sample_id: str, fastq_paths, meta=None,
                          tech: str = "") -> None:

@@ -523,7 +523,8 @@ class ClusterManager:
             },
             "metadata": {
                 key: sample["meta"].get(key) for key in (
-                    "gsm", "organism", "instrument", "library_strategy"
+                    "gsm", "organism", "instrument", "library_strategy",
+                    "tech",
                 )
             },
             "archive": {
